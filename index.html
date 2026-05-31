@@ -1,0 +1,1267 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Drift — 2D Newtonian Space Game</title>
+<style>
+  html, body {
+    margin: 0;
+    padding: 0;
+    background: #05060d;
+    color: #cfe;
+    font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+    overflow: hidden;
+    height: 100%;
+  }
+  #game {
+    display: block;
+    width: 100vw;
+    height: 100vh;
+    background: radial-gradient(ellipse at center, #0a0f1f 0%, #02030a 70%, #000 100%);
+    cursor: crosshair;
+  }
+  #hud {
+    position: fixed;
+    top: 12px;
+    left: 14px;
+    pointer-events: none;
+    font-size: 13px;
+    line-height: 1.5;
+    text-shadow: 0 0 6px #0af;
+    opacity: 0.9;
+  }
+  #hud .row { display: flex; gap: 6px; align-items: baseline; }
+  #hud .lbl { color: #6cc; width: 70px; }
+  #hud .val { color: #cfe; }
+  #help {
+    position: fixed;
+    bottom: 14px;
+    left: 14px;
+    font-size: 12px;
+    color: #6cc;
+    text-shadow: 0 0 6px #036;
+    opacity: 0.75;
+    pointer-events: none;
+  }
+  #help kbd {
+    background: #112;
+    border: 1px solid #356;
+    border-radius: 3px;
+    padding: 1px 5px;
+    color: #cfe;
+    font-family: inherit;
+    margin: 0 1px;
+  }
+</style>
+</head>
+<body>
+<canvas id="game"></canvas>
+<div id="hud">
+  <div class="row"><span class="lbl">SPEED</span><span class="val" id="hud-speed">0.0</span></div>
+  <div class="row"><span class="lbl">HEADING</span><span class="val" id="hud-heading">0°</span></div>
+  <div class="row"><span class="lbl">POS</span><span class="val" id="hud-pos">0, 0</span></div>
+</div>
+<div id="help">
+  <kbd>W</kbd> thrust &nbsp;
+  <kbd>S</kbd> brake &nbsp;
+  <kbd>A</kbd>/<kbd>D</kbd> steer &nbsp;
+  <kbd>Space</kbd> drift (free-rotate) &nbsp;
+  <kbd>Shift</kbd> boost &nbsp;
+  <kbd>Mouse</kbd> aim cone &nbsp;
+  <kbd>Click</kbd> fire
+</div>
+
+<script>
+"use strict";
+
+// ---------------------------------------------------------------------------
+// Canvas setup with DPR awareness
+// ---------------------------------------------------------------------------
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+let viewW = 0, viewH = 0, dpr = 1;
+
+function resize() {
+  dpr = Math.max(1, Math.min(2, window.devicePixelRatio || 1));
+  viewW = window.innerWidth;
+  viewH = window.innerHeight;
+  canvas.width = Math.floor(viewW * dpr);
+  canvas.height = Math.floor(viewH * dpr);
+  canvas.style.width = viewW + "px";
+  canvas.style.height = viewH + "px";
+}
+window.addEventListener("resize", resize);
+resize();
+
+// ---------------------------------------------------------------------------
+// Input
+// ---------------------------------------------------------------------------
+const keys = Object.create(null);
+window.addEventListener("keydown", e => {
+  keys[e.code] = true;
+  // prevent page scroll on space / arrow keys
+  if (["Space","ArrowUp","ArrowDown","ArrowLeft","ArrowRight"].includes(e.code)) e.preventDefault();
+});
+window.addEventListener("keyup",   e => { keys[e.code] = false; });
+window.addEventListener("blur",    () => { for (const k in keys) keys[k] = false; mouse.down = false; });
+
+const mouse = { x: viewW / 2, y: viewH / 2, down: false };
+canvas.addEventListener("mousemove", e => {
+  const rect = canvas.getBoundingClientRect();
+  mouse.x = e.clientX - rect.left;
+  mouse.y = e.clientY - rect.top;
+});
+canvas.addEventListener("mousedown", e => {
+  if (e.button === 0) { mouse.down = true; e.preventDefault(); }
+});
+window.addEventListener("mouseup", e => {
+  if (e.button === 0) mouse.down = false;
+});
+canvas.addEventListener("contextmenu", e => e.preventDefault());
+
+// ---------------------------------------------------------------------------
+// Ship — Newtonian flight model with velocity-locked orientation.
+//
+// Linear momentum is preserved (vx, vy). The hull's nose is *not* an
+// independent degree of freedom — whenever the ship is moving, its
+// heading is set to the velocity vector, so the visual orientation
+// always matches the direction of travel. Below a small speed threshold
+// the player can rotate freely to aim before accelerating.
+//
+// A/D apply a lateral force perpendicular to the current heading.
+// Because that force rotates the velocity vector (centripetal-style),
+// and heading follows velocity, holding A/D while thrusting traces a
+// natural arc — exactly the requested behavior.
+// ---------------------------------------------------------------------------
+const ship = {
+  x: 0, y: 0,            // world position (px)
+  vx: 0, vy: 0,          // linear velocity (px/s)
+  heading: -Math.PI / 2, // where the nose points (radians, -PI/2 = up)
+
+  mass: 1.0,             // scales force -> accel
+
+  // Engines (force magnitudes)
+  mainThrust: 520,       // forward, along heading
+  retroThrust: 320,      // brake against velocity
+  lateralThrust: 1375,   // A/D — perpendicular to heading (higher = tighter arcs)
+  alignRate: 12,         // rad/s — max angular rate heading slews back to velocity
+
+  // Speed limits — dynamic so Shift can push you above the normal cap.
+  maxSpeed: 360,         // baseline cap on linear speed (px/s)
+  boostMaxSpeed: 600,    // ceiling while Shift is held
+  boostDecayRate: 1.6,   // 1/s — how fast the cap returns after Shift release
+  currentCap: 360,       // live cap (mutated each tick — start at baseline)
+
+  // Heading control when essentially at rest
+  turnRateRest: 2.6,     // rad/s
+  alignSpeed: 5,         // px/s — above this, heading = velocity vector
+
+  // Linear damping. Exponential form is framerate-independent;
+  // 0.45/s means coasting speed halves in ~1.5 seconds.
+  linearDrag: 0.45,
+
+  // Visual
+  radius: 56,             // collision / overlay radius
+  spriteSize: 192,        // on-screen size of the prerendered sprite (px)
+
+  // Heading is snapped to a discrete grid (see SHIP_DIRECTIONS below).
+  // headingAccum holds the un-applied fraction of any manual rotation
+  // input so that sub-step slews still advance the heading instead of
+  // being silently rounded away.
+  headingAccum: 0,
+};
+
+// Prerendered ship sprite sheet — 6×6 grid (last 4 cells empty) of
+// 180×180 frames covering 32 evenly-spaced angles. The PNG itself is
+// 1201×1144 because there's a metadata label strip on the right/bottom,
+// but the frame grid is anchored at (0,0) with no inter-frame padding.
+const shipSprite = new Image();
+let shipSpriteReady = false;
+shipSprite.addEventListener("load",  () => { shipSpriteReady = true; });
+shipSprite.addEventListener("error", () => { console.warn("ship sprite failed to load"); });
+shipSprite.src = "prerenderedships-v1/thirtytwo/colony2.png";
+const SHIP_SPRITE = {
+  frames: 32, cols: 6, frameSize: 180,
+  // Frame 0 = nose up (heading -π/2); frames advance clockwise.
+  frameForHeading(h) {
+    const raw = (h + Math.PI / 2) * this.frames / (Math.PI * 2);
+    return ((Math.round(raw) % this.frames) + this.frames) % this.frames;
+  },
+};
+
+// Enemy sprite — same 6×6 / 180px frame layout as the player, so we can
+// reuse SHIP_SPRITE.frameForHeading for both.
+const enemySprite = new Image();
+let enemySpriteReady = false;
+enemySprite.addEventListener("load",  () => { enemySpriteReady = true; });
+enemySprite.addEventListener("error", () => { console.warn("enemy sprite failed to load"); });
+enemySprite.src = "prerenderedships-v1/thirtytwo/terrok2.png";
+
+// Heading lives on a discrete grid so the ship orientation is fully
+// deterministic — left-then-right-then-left always returns to the same
+// angle, and every heading value lines up exactly with a sprite frame.
+const SHIP_DIRECTIONS = 32;
+const SNAP_STEP = (Math.PI * 2) / SHIP_DIRECTIONS;
+const snapHeading = h => Math.round(h / SNAP_STEP) * SNAP_STEP;
+
+// ---------------------------------------------------------------------------
+// Camera — smoothly follows the ship, looks slightly ahead along velocity.
+// ---------------------------------------------------------------------------
+const camera = { x: 0, y: 0 };
+
+// ---------------------------------------------------------------------------
+// Stars — three parallax layers so the world feels deep and you can
+// actually perceive your motion.
+// ---------------------------------------------------------------------------
+function makeStarLayer(count, parallax, sizeRange, colorFn) {
+  const stars = [];
+  for (let i = 0; i < count; i++) {
+    stars.push({
+      x: Math.random(),
+      y: Math.random(),
+      size: sizeRange[0] + Math.random() * (sizeRange[1] - sizeRange[0]),
+      color: colorFn(),
+      twinkle: Math.random() * Math.PI * 2,
+    });
+  }
+  return { stars, parallax };
+}
+const starLayers = [
+  makeStarLayer(140, 0.10, [0.6, 1.2], () => "rgba(120,140,180,0.55)"),
+  makeStarLayer(110, 0.30, [0.8, 1.7], () => "rgba(180,200,230,0.75)"),
+  makeStarLayer( 70, 0.65, [1.2, 2.4], () => {
+    const hue = 180 + Math.random() * 60;
+    return `hsla(${hue},80%,80%,0.95)`;
+  }),
+];
+
+// Distant nebula blobs for color variety. Drawn once per layer at a fixed
+// world tile, repeated with parallax offset.
+const nebulas = [];
+for (let i = 0; i < 8; i++) {
+  nebulas.push({
+    x: (Math.random() - 0.5) * 4000,
+    y: (Math.random() - 0.5) * 4000,
+    r: 220 + Math.random() * 380,
+    hue: Math.random() < 0.5 ? 220 + Math.random() * 40 : 290 + Math.random() * 40,
+    parallax: 0.18 + Math.random() * 0.12,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Drifting asteroids — give the player something to weave around so the
+// flight model is actually felt.
+// ---------------------------------------------------------------------------
+const asteroids = [];
+function spawnAsteroid(x, y) {
+  const sides = 7 + Math.floor(Math.random() * 5);
+  const r = 18 + Math.random() * 42;
+  const verts = [];
+  for (let i = 0; i < sides; i++) {
+    const a = (i / sides) * Math.PI * 2;
+    const rr = r * (0.7 + Math.random() * 0.5);
+    verts.push({ x: Math.cos(a) * rr, y: Math.sin(a) * rr });
+  }
+  asteroids.push({
+    x, y,
+    vx: (Math.random() - 0.5) * 30,
+    vy: (Math.random() - 0.5) * 30,
+    angle: Math.random() * Math.PI * 2,
+    spin: (Math.random() - 0.5) * 0.6,
+    radius: r,
+    verts,
+    shade: 90 + Math.floor(Math.random() * 40),
+  });
+}
+for (let i = 0; i < 26; i++) {
+  spawnAsteroid((Math.random() - 0.5) * 2400, (Math.random() - 0.5) * 2400);
+}
+
+// ---------------------------------------------------------------------------
+// Engine particles — exhaust trail. Keeps the thrust feedback visceral.
+// ---------------------------------------------------------------------------
+const particles = [];
+function emitExhaust(x, y, vx, vy, count, hue) {
+  for (let i = 0; i < count; i++) {
+    const spread = (Math.random() - 0.5) * 0.5;
+    const sp = 60 + Math.random() * 140;
+    const dir = Math.atan2(vy, vx) + spread;
+    particles.push({
+      x, y,
+      vx: Math.cos(dir) * sp + (Math.random() - 0.5) * 20,
+      vy: Math.sin(dir) * sp + (Math.random() - 0.5) * 20,
+      life: 0.35 + Math.random() * 0.35,
+      maxLife: 0.7,
+      hue,
+      size: 1.5 + Math.random() * 1.8,
+    });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Engine trail — smooth white fading line that replaces the orange
+// flame particles. Each tick that W is held drops a point at the ship's
+// engine bell; points age out over TRAIL_LIFE and are pruned from the
+// front of the array (oldest first). Render draws each segment with
+// alpha and line width tapered by age so the streak fades behind you.
+// ---------------------------------------------------------------------------
+const trail = [];
+const TRAIL_LIFE = 0.55;       // seconds before a point disappears
+const TRAIL_MAX_WIDTH = 5;     // px at the head of the trail
+const TRAIL_MIN_WIDTH = 0.4;   // px at the tail (just before pruning)
+
+function updateTrail(dt) {
+  for (let i = 0; i < trail.length; i++) trail[i].age += dt;
+  while (trail.length > 0 && trail[0].age >= TRAIL_LIFE) trail.shift();
+}
+
+function drawTrail() {
+  if (trail.length < 2) return;
+  ctx.save();
+  ctx.lineCap = "round";
+  ctx.lineJoin = "round";
+  for (let i = 1; i < trail.length; i++) {
+    const a = trail[i - 1];
+    const b = trail[i];
+    // Newest end of the segment determines its alpha/width, so the
+    // line stays bright right up to the ship and fades only behind.
+    const youngerAge = Math.min(a.age, b.age);
+    const k = Math.max(0, 1 - youngerAge / TRAIL_LIFE);
+    const pa = worldToScreen(a.x, a.y);
+    const pb = worldToScreen(b.x, b.y);
+    ctx.lineWidth = TRAIL_MIN_WIDTH + (TRAIL_MAX_WIDTH - TRAIL_MIN_WIDTH) * k;
+    ctx.strokeStyle = `rgba(255,255,255,${0.85 * k})`;
+    ctx.beginPath();
+    ctx.moveTo(pa.x, pa.y);
+    ctx.lineTo(pb.x, pb.y);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+// ---------------------------------------------------------------------------
+// Enemies — fly the same Newtonian flight model as the player, just with
+// weaker thrust and slower top speed. AI decides W/A/D/S each tick; the
+// physics call is identical to the player's.
+// ---------------------------------------------------------------------------
+const enemies = [];
+const enemyConfig = {
+  count: 6,
+  health: 3,
+  radius: 35,
+  spriteSize: 120,
+  spawnMin: 900,
+  spawnVary: 500,
+  // Per-enemy flight model, copied onto each spawned enemy so applyShipPhysics
+  // can read the constants directly off the entity.
+  flight: {
+    mass: 1.0,
+    mainThrust: 380,
+    retroThrust: 240,
+    lateralThrust: 950,
+    turnRateRest: 2.0,
+    linearDrag: 0.45,
+    maxSpeed: 270,
+    boostMaxSpeed: 270,   // enemies don't boost
+    boostDecayRate: 1.6,
+    alignSpeed: 5,
+  },
+  ai: {
+    facingTolerance: 0.55, // rad — must be aimed this close to thrust
+    minThrustDist: 280,    // don't burn engines when this close (avoids ramming)
+    brakeDist: 220,        // brake when this close and closing fast
+    brakeClosingSpeed: 40, // px/s of approach speed required to trigger brake
+  },
+};
+
+function spawnEnemy() {
+  const a = Math.random() * Math.PI * 2;
+  const d = enemyConfig.spawnMin + Math.random() * enemyConfig.spawnVary;
+  const f = enemyConfig.flight;
+  enemies.push({
+    x: ship.x + Math.cos(a) * d,
+    y: ship.y + Math.sin(a) * d,
+    vx: 0, vy: 0,
+    heading: snapHeading(a + Math.PI),
+    headingAccum: 0,
+    health: enemyConfig.health,
+    hitFlash: 0,
+    stun: 0,
+    radius: enemyConfig.radius,
+    spriteSize: enemyConfig.spriteSize,
+    // Flight model — same field names as the player ship.
+    mass: f.mass,
+    mainThrust: f.mainThrust,
+    retroThrust: f.retroThrust,
+    lateralThrust: f.lateralThrust,
+    turnRateRest: f.turnRateRest,
+    linearDrag: f.linearDrag,
+    maxSpeed: f.maxSpeed,
+    boostMaxSpeed: f.boostMaxSpeed,
+    boostDecayRate: f.boostDecayRate,
+    currentCap: f.maxSpeed,
+    alignSpeed: f.alignSpeed,
+  });
+}
+
+function explodeEnemy(e) {
+  for (let i = 0; i < 26; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const sp = 60 + Math.random() * 240;
+    particles.push({
+      x: e.x, y: e.y,
+      vx: e.vx * 0.4 + Math.cos(a) * sp,
+      vy: e.vy * 0.4 + Math.sin(a) * sp,
+      life: 0.4 + Math.random() * 0.5,
+      maxLife: 0.9,
+      hue: 10 + Math.random() * 20,
+      size: 1.6 + Math.random() * 2.4,
+    });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Weapons — left/right side cannons with a forward-fanning spread.
+// Mouse position decides which side is "armed". Only one side can fire
+// at a time; the spread is biased outward from the ship so the burst
+// visibly comes off the chosen flank.
+// ---------------------------------------------------------------------------
+const projectiles = [];
+const weapon = {
+  fireRate: 7,                  // shots per second while left-click is held
+  cooldown: 0,
+  projectileSpeed: 1300,        // px/s, added to ship velocity at fire time
+  projectileLifetime: 1.4,
+  muzzleForward: 0.42,          // forward offset from center (× ship.spriteSize)
+  halfCone: Math.PI / 12,       // ±15° aim cone around ship.heading (30° total)
+  reticleDistance: 1.5,         // reticle pos along aim, in spriteSize units
+};
+
+// Aim angle: the mouse direction (world space) clamped to ±halfCone of
+// the ship's heading. Returns the unclamped diff too so the reticle can
+// color itself when the cursor has pushed past the cone edge.
+function computeAim() {
+  const mouseWorldX = mouse.x - viewW / 2 + camera.x;
+  const mouseWorldY = mouse.y - viewH / 2 + camera.y;
+  const mdx = mouseWorldX - ship.x;
+  const mdy = mouseWorldY - ship.y;
+  if (mdx * mdx + mdy * mdy < 9) {
+    return { angle: ship.heading, diff: 0, clamped: false };
+  }
+  const target = Math.atan2(mdy, mdx);
+  let diff = target - ship.heading;
+  while (diff >  Math.PI) diff -= Math.PI * 2;
+  while (diff < -Math.PI) diff += Math.PI * 2;
+  const clipped = Math.max(-weapon.halfCone, Math.min(weapon.halfCone, diff));
+  return { angle: ship.heading + clipped, diff, clamped: Math.abs(diff) > weapon.halfCone };
+}
+
+function emitMuzzleFlash(x, y, dirAngle) {
+  for (let i = 0; i < 7; i++) {
+    const a = dirAngle + (Math.random() - 0.5) * 0.7;
+    const sp = 60 + Math.random() * 160;
+    particles.push({
+      x, y,
+      vx: Math.cos(a) * sp,
+      vy: Math.sin(a) * sp,
+      life: 0.10 + Math.random() * 0.14,
+      maxLife: 0.24,
+      hue: 48,
+      size: 2 + Math.random() * 2,
+    });
+  }
+}
+
+function emitImpact(x, y, vx, vy) {
+  const back = Math.atan2(-vy, -vx);
+  for (let i = 0; i < 9; i++) {
+    const a = back + (Math.random() - 0.5) * 1.9;
+    const sp = 80 + Math.random() * 200;
+    particles.push({
+      x, y,
+      vx: Math.cos(a) * sp,
+      vy: Math.sin(a) * sp,
+      life: 0.18 + Math.random() * 0.22,
+      maxLife: 0.4,
+      hue: 30,
+      size: 1.4 + Math.random() * 1.8,
+    });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Simulation step
+// ---------------------------------------------------------------------------
+
+// Shared flight model — runs the player and the enemies through the exact
+// same physics. `controls` is a struct of boolean inputs; the entity must
+// supply all the flight-model fields (mass, mainThrust, retroThrust,
+// lateralThrust, turnRateRest, linearDrag, maxSpeed, boostMaxSpeed,
+// boostDecayRate, currentCap, alignSpeed) plus state (x, y, vx, vy,
+// heading, headingAccum). The function mutates state in place.
+function applyShipPhysics(s, controls, dt) {
+  const boostMul = controls.boost ? 1.7 : 1.0;
+
+  // Manual heading rotation with snap accumulator — A/D always rotates
+  // the hull; drift only affects whether lateral force is also applied.
+  let manual = 0;
+  if (controls.turnLeft)  manual -= s.turnRateRest * dt;
+  if (controls.turnRight) manual += s.turnRateRest * dt;
+  s.headingAccum += manual;
+  const halfStep = SNAP_STEP / 2;
+  while (s.headingAccum >=  halfStep) {
+    s.heading = snapHeading(s.heading + SNAP_STEP);
+    s.headingAccum -= SNAP_STEP;
+  }
+  while (s.headingAccum <= -halfStep) {
+    s.heading = snapHeading(s.heading - SNAP_STEP);
+    s.headingAccum += SNAP_STEP;
+  }
+
+  const cosH = Math.cos(s.heading);
+  const sinH = Math.sin(s.heading);
+  const speed = Math.hypot(s.vx, s.vy);
+  const moving = speed > s.alignSpeed;
+
+  let fx = 0, fy = 0;
+
+  if (controls.thrust) {
+    fx += cosH * s.mainThrust * boostMul;
+    fy += sinH * s.mainThrust * boostMul;
+  }
+
+  // Brake force opposes velocity (not heading); capped so it can't push
+  // backwards past zero.
+  if (controls.brake && speed > 0.05) {
+    const brake = Math.min(s.retroThrust, speed * s.mass / Math.max(dt, 1e-4));
+    fx -= (s.vx / speed) * brake;
+    fy -= (s.vy / speed) * brake;
+  }
+
+  // Lateral force from A/D — only while moving and not drifting.
+  if (moving && !controls.drift) {
+    if (controls.turnLeft) {
+      fx += sinH * s.lateralThrust;
+      fy -= cosH * s.lateralThrust;
+    }
+    if (controls.turnRight) {
+      fx -= sinH * s.lateralThrust;
+      fy += cosH * s.lateralThrust;
+    }
+  }
+
+  // Integrate.
+  s.vx += (fx / s.mass) * dt;
+  s.vy += (fy / s.mass) * dt;
+  const drag = Math.exp(-s.linearDrag * dt);
+  s.vx *= drag;
+  s.vy *= drag;
+
+  // Dynamic speed cap with boost decay.
+  if (controls.boost) {
+    s.currentCap = s.boostMaxSpeed;
+  } else {
+    s.currentCap += (s.maxSpeed - s.currentCap) * (1 - Math.exp(-s.boostDecayRate * dt));
+  }
+  const newSpeed = Math.hypot(s.vx, s.vy);
+  if (newSpeed > s.currentCap) {
+    const k = s.currentCap / newSpeed;
+    s.vx *= k;
+    s.vy *= k;
+  }
+
+  s.x += s.vx * dt;
+  s.y += s.vy * dt;
+}
+
+function updateShip(dt) {
+  const controls = {
+    thrust:    !!(keys["KeyW"] || keys["ArrowUp"]),
+    brake:     !!(keys["KeyS"] || keys["ArrowDown"]),
+    turnLeft:  !!(keys["KeyA"] || keys["ArrowLeft"]),
+    turnRight: !!(keys["KeyD"] || keys["ArrowRight"]),
+    drift:     !!keys["Space"],
+    boost:     !!(keys["ShiftLeft"] || keys["ShiftRight"]),
+  };
+
+  // Player-only visuals: trail emission and brake puff. Anchor to the
+  // ship's current heading before physics runs so the particles spawn
+  // on the visual rear of this frame's sprite.
+  const cosH = Math.cos(ship.heading);
+  const sinH = Math.sin(ship.heading);
+
+  if (controls.thrust) {
+    trail.push({
+      x: ship.x - cosH * ship.spriteSize * 0.32,
+      y: ship.y - sinH * ship.spriteSize * 0.32,
+      age: 0,
+    });
+  }
+  if (controls.brake && Math.hypot(ship.vx, ship.vy) > 0.05) {
+    const ex = ship.x + cosH * ship.radius * 0.6;
+    const ey = ship.y + sinH * ship.radius * 0.6;
+    emitExhaust(ex, ey, cosH, sinH, 1, 200);
+  }
+
+  applyShipPhysics(ship, controls, dt);
+}
+
+function updateAsteroids(dt) {
+  for (const a of asteroids) {
+    a.x += a.vx * dt;
+    a.y += a.vy * dt;
+    a.angle += a.spin * dt;
+  }
+
+  // Ship vs asteroid: elastic-ish bounce that respects mass. This is the
+  // moment the flight model pays off — getting hit while drifting sends
+  // you tumbling.
+  const s = ship;
+  for (const a of asteroids) {
+    const dx = s.x - a.x;
+    const dy = s.y - a.y;
+    const minR = s.radius + a.radius * 0.85;
+    const d2 = dx * dx + dy * dy;
+    if (d2 < minR * minR && d2 > 0.0001) {
+      const d = Math.sqrt(d2);
+      const nx = dx / d, ny = dy / d;
+      const overlap = minR - d;
+
+      // Asteroids are heavier than the ship — push the ship out more.
+      const aMass = (a.radius * a.radius) / 200;
+      const total = s.mass + aMass;
+      s.x += nx * overlap * (aMass / total);
+      s.y += ny * overlap * (aMass / total);
+      a.x -= nx * overlap * (s.mass / total);
+      a.y -= ny * overlap * (s.mass / total);
+
+      // Relative velocity along the normal.
+      const rvx = s.vx - a.vx;
+      const rvy = s.vy - a.vy;
+      const velAlongNormal = rvx * nx + rvy * ny;
+      if (velAlongNormal < 0) {
+        const restitution = 0.55;
+        const j = -(1 + restitution) * velAlongNormal / (1 / s.mass + 1 / aMass);
+        const jx = j * nx, jy = j * ny;
+        s.vx += jx / s.mass;
+        s.vy += jy / s.mass;
+        a.vx -= jx / aMass;
+        a.vy -= jy / aMass;
+        // Tumble the rock on impact (the ship itself can't spin
+        // independently — its heading is locked to its velocity).
+        a.spin += (Math.random() - 0.5) * 0.8;
+      }
+    }
+  }
+}
+
+// Decide what an enemy "presses" this tick. Roughly: turn toward the
+// player; thrust when facing them and not within ramming range; brake
+// if closing too fast at short range. Stunned enemies coast and don't
+// steer, so the projectile knockback feels like a real interruption.
+function decideEnemyControls(e) {
+  if (e.stun > 0) {
+    return { thrust: false, brake: false, turnLeft: false, turnRight: false, drift: false, boost: false };
+  }
+  const dx = ship.x - e.x;
+  const dy = ship.y - e.y;
+  const dist = Math.hypot(dx, dy) || 1;
+  const targetA = Math.atan2(dy, dx);
+  let diff = targetA - e.heading;
+  while (diff >  Math.PI) diff -= Math.PI * 2;
+  while (diff < -Math.PI) diff += Math.PI * 2;
+
+  // Dead-zone of half a snap step prevents oscillation between adjacent
+  // discrete headings when the player is roughly straight ahead.
+  const turnLeft  = diff < -SNAP_STEP * 0.5;
+  const turnRight = diff >  SNAP_STEP * 0.5;
+  const facing = Math.abs(diff) < enemyConfig.ai.facingTolerance;
+  const thrust = facing && dist > enemyConfig.ai.minThrustDist;
+
+  // Closing speed = dot(velocity, unit_to_player). Positive = approaching.
+  const closingSpeed = (e.vx * dx + e.vy * dy) / dist;
+  const brake = dist < enemyConfig.ai.brakeDist
+             && closingSpeed > enemyConfig.ai.brakeClosingSpeed;
+
+  return { thrust, brake, turnLeft, turnRight, drift: false, boost: false };
+}
+
+function updateEnemies(dt) {
+  while (enemies.length < enemyConfig.count) spawnEnemy();
+
+  for (let i = enemies.length - 1; i >= 0; i--) {
+    const e = enemies[i];
+
+    if (e.health <= 0) {
+      explodeEnemy(e);
+      enemies.splice(i, 1);
+      continue;
+    }
+
+    if (e.hitFlash > 0) e.hitFlash -= dt;
+    if (e.stun > 0) e.stun -= dt;
+
+    const controls = decideEnemyControls(e);
+    e.thrusting = controls.thrust;  // exposed so drawEnemies can fire the engine glow
+    applyShipPhysics(e, controls, dt);
+
+    // Collide with the player ship — elastic-ish bounce that uses the
+    // enemy's actual mass (rather than the old 0.6 magic number) so the
+    // exchange feels consistent with the shared flight model.
+    const pdx = e.x - ship.x;
+    const pdy = e.y - ship.y;
+    const minR = e.radius + ship.radius;
+    const d2 = pdx * pdx + pdy * pdy;
+    if (d2 < minR * minR && d2 > 1e-4) {
+      const d = Math.sqrt(d2);
+      const nx = pdx / d, ny = pdy / d;
+      const eMass = e.mass;
+      const total = ship.mass + eMass;
+      const overlap = minR - d;
+      ship.x -= nx * overlap * (eMass / total);
+      ship.y -= ny * overlap * (eMass / total);
+      e.x += nx * overlap * (ship.mass / total);
+      e.y += ny * overlap * (ship.mass / total);
+      const rvx = ship.vx - e.vx;
+      const rvy = ship.vy - e.vy;
+      const velN = rvx * nx + rvy * ny;
+      if (velN < 0) {
+        const j = -1.5 * velN / (1 / ship.mass + 1 / eMass);
+        ship.vx += j * nx / ship.mass;
+        ship.vy += j * ny / ship.mass;
+        e.vx -= j * nx / eMass;
+        e.vy -= j * ny / eMass;
+      }
+      e.health -= 1;
+      e.hitFlash = 0.15;
+      e.stun = 0.35;
+    }
+  }
+}
+
+function updateWeapons(dt) {
+  weapon.cooldown -= dt;
+  if (!mouse.down || weapon.cooldown > 0) return;
+
+  // Muzzle stays on the nose along the ship's heading — only the bullet
+  // direction follows the (clamped) aim, so the cannon visually fires
+  // out of the front of the hull regardless of where in the cone the
+  // cursor is.
+  const cosH = Math.cos(ship.heading);
+  const sinH = Math.sin(ship.heading);
+  const muzzleX = ship.x + cosH * ship.spriteSize * weapon.muzzleForward;
+  const muzzleY = ship.y + sinH * ship.spriteSize * weapon.muzzleForward;
+
+  const aim = computeAim().angle;
+  const cosA = Math.cos(aim);
+  const sinA = Math.sin(aim);
+
+  projectiles.push({
+    x: muzzleX,
+    y: muzzleY,
+    // Projectiles inherit ship momentum (Newtonian).
+    vx: ship.vx + cosA * weapon.projectileSpeed,
+    vy: ship.vy + sinA * weapon.projectileSpeed,
+    life: weapon.projectileLifetime,
+    maxLife: weapon.projectileLifetime,
+  });
+
+  emitMuzzleFlash(muzzleX, muzzleY, aim);
+  weapon.cooldown = 1 / weapon.fireRate;
+}
+
+function updateProjectiles(dt) {
+  for (let i = projectiles.length - 1; i >= 0; i--) {
+    const p = projectiles[i];
+    p.life -= dt;
+    if (p.life <= 0) { projectiles.splice(i, 1); continue; }
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+
+    let consumed = false;
+
+    // Enemy hit — check first so bullets that pass close to an asteroid
+    // can still clip the enemy behind it. One hit removes the bullet,
+    // knocks the enemy back, and briefly stuns it.
+    for (let j = 0; j < enemies.length; j++) {
+      const e = enemies[j];
+      const ddx = p.x - e.x;
+      const ddy = p.y - e.y;
+      const rr = e.radius;
+      if (ddx * ddx + ddy * ddy < rr * rr) {
+        emitImpact(p.x, p.y, p.vx, p.vy);
+        const sp = Math.hypot(p.vx, p.vy) || 1;
+        e.vx += (p.vx / sp) * 40;
+        e.vy += (p.vy / sp) * 40;
+        e.health -= 1;
+        e.hitFlash = 0.12;
+        e.stun = Math.max(e.stun, 0.18);
+        consumed = true;
+        break;
+      }
+    }
+    if (consumed) { projectiles.splice(i, 1); continue; }
+
+    // Asteroid hit — shoves the rock and dies.
+    for (let j = 0; j < asteroids.length; j++) {
+      const a = asteroids[j];
+      const ddx = p.x - a.x;
+      const ddy = p.y - a.y;
+      const rr = a.radius * 0.9;
+      if (ddx * ddx + ddy * ddy < rr * rr) {
+        emitImpact(p.x, p.y, p.vx, p.vy);
+        const sp = Math.hypot(p.vx, p.vy);
+        const aMass = (a.radius * a.radius) / 200;
+        a.vx += (p.vx / sp) * 80 / aMass;
+        a.vy += (p.vy / sp) * 80 / aMass;
+        a.spin += (Math.random() - 0.5) * 0.4;
+        projectiles.splice(i, 1);
+        break;
+      }
+    }
+  }
+}
+
+function updateParticles(dt) {
+  for (let i = particles.length - 1; i >= 0; i--) {
+    const p = particles[i];
+    p.life -= dt;
+    if (p.life <= 0) { particles.splice(i, 1); continue; }
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+    p.vx *= Math.exp(-1.6 * dt);
+    p.vy *= Math.exp(-1.6 * dt);
+  }
+}
+
+function updateCamera(dt) {
+  // Look slightly along velocity so you can see where you're heading.
+  const lookAheadX = ship.x + ship.vx * 0.35;
+  const lookAheadY = ship.y + ship.vy * 0.35;
+  const k = 1 - Math.exp(-3.5 * dt);
+  camera.x += (lookAheadX - camera.x) * k;
+  camera.y += (lookAheadY - camera.y) * k;
+}
+
+// ---------------------------------------------------------------------------
+// Rendering
+// ---------------------------------------------------------------------------
+function drawStars() {
+  // For each star layer: project tiled star field with parallax.
+  ctx.save();
+  for (const layer of starLayers) {
+    const px = camera.x * layer.parallax;
+    const py = camera.y * layer.parallax;
+    const tileW = 1400, tileH = 1400;
+    const offX = ((px % tileW) + tileW) % tileW;
+    const offY = ((py % tileH) + tileH) % tileH;
+    for (const star of layer.stars) {
+      // Star positions are normalized in tile; render across a 3x3 of tiles
+      // around the camera so the field appears infinite.
+      const sx0 = star.x * tileW - offX;
+      const sy0 = star.y * tileH - offY;
+      for (let tx = -1; tx <= 1; tx++) {
+        for (let ty = -1; ty <= 1; ty++) {
+          const x = sx0 + tx * tileW + viewW / 2;
+          const y = sy0 + ty * tileH + viewH / 2;
+          if (x < -4 || y < -4 || x > viewW + 4 || y > viewH + 4) continue;
+          const tw = 0.75 + 0.25 * Math.sin(star.twinkle + performance.now() * 0.001);
+          ctx.fillStyle = star.color;
+          ctx.globalAlpha = tw;
+          ctx.beginPath();
+          ctx.arc(x, y, star.size, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+    }
+  }
+  ctx.globalAlpha = 1;
+  ctx.restore();
+}
+
+function drawNebulas() {
+  ctx.save();
+  ctx.globalCompositeOperation = "lighter";
+  for (const n of nebulas) {
+    const sx = (n.x - camera.x * n.parallax) + viewW / 2;
+    const sy = (n.y - camera.y * n.parallax) + viewH / 2;
+    if (sx < -n.r * 2 || sy < -n.r * 2 || sx > viewW + n.r * 2 || sy > viewH + n.r * 2) continue;
+    const g = ctx.createRadialGradient(sx, sy, 0, sx, sy, n.r);
+    g.addColorStop(0,    `hsla(${n.hue},80%,55%,0.20)`);
+    g.addColorStop(0.55, `hsla(${n.hue},70%,40%,0.07)`);
+    g.addColorStop(1,    `hsla(${n.hue},60%,30%,0)`);
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(sx, sy, n.r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+function worldToScreen(wx, wy) {
+  return { x: wx - camera.x + viewW / 2, y: wy - camera.y + viewH / 2 };
+}
+
+function drawAsteroids() {
+  ctx.save();
+  for (const a of asteroids) {
+    const p = worldToScreen(a.x, a.y);
+    if (p.x < -a.radius * 2 || p.y < -a.radius * 2 ||
+        p.x > viewW + a.radius * 2 || p.y > viewH + a.radius * 2) continue;
+    ctx.save();
+    ctx.translate(p.x, p.y);
+    ctx.rotate(a.angle);
+    ctx.beginPath();
+    for (let i = 0; i < a.verts.length; i++) {
+      const v = a.verts[i];
+      if (i === 0) ctx.moveTo(v.x, v.y); else ctx.lineTo(v.x, v.y);
+    }
+    ctx.closePath();
+    const grad = ctx.createRadialGradient(-a.radius * 0.3, -a.radius * 0.3, 4, 0, 0, a.radius);
+    grad.addColorStop(0, `hsl(30, 12%, ${a.shade}%)`);
+    grad.addColorStop(1, `hsl(30, 14%, ${Math.max(20, a.shade - 50)}%)`);
+    ctx.fillStyle = grad;
+    ctx.fill();
+    ctx.lineWidth = 1.2;
+    ctx.strokeStyle = `hsla(30,20%,${Math.max(15, a.shade - 60)}%,0.9)`;
+    ctx.stroke();
+    ctx.restore();
+  }
+  ctx.restore();
+}
+
+function drawParticles() {
+  ctx.save();
+  ctx.globalCompositeOperation = "lighter";
+  for (const p of particles) {
+    const sp = worldToScreen(p.x, p.y);
+    const k = Math.max(0, p.life / p.maxLife);
+    ctx.fillStyle = `hsla(${p.hue}, 100%, ${50 + 30 * k}%, ${k})`;
+    ctx.beginPath();
+    ctx.arc(sp.x, sp.y, p.size * (0.5 + k), 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawEnemies() {
+  for (const e of enemies) {
+    const sp = worldToScreen(e.x, e.y);
+    const size = e.spriteSize;
+    const margin = size;
+    if (sp.x < -margin || sp.y < -margin ||
+        sp.x > viewW + margin || sp.y > viewH + margin) continue;
+
+    if (enemySpriteReady) {
+      const frame = SHIP_SPRITE.frameForHeading(e.heading);
+      const sx = (frame % SHIP_SPRITE.cols) * SHIP_SPRITE.frameSize;
+      const sy = Math.floor(frame / SHIP_SPRITE.cols) * SHIP_SPRITE.frameSize;
+      ctx.drawImage(enemySprite,
+        sx, sy, SHIP_SPRITE.frameSize, SHIP_SPRITE.frameSize,
+        sp.x - size / 2, sp.y - size / 2, size, size);
+    } else {
+      // Fallback while the image streams in.
+      ctx.save();
+      ctx.translate(sp.x, sp.y);
+      ctx.rotate(e.heading);
+      ctx.fillStyle = "rgba(180,40,40,0.9)";
+      ctx.beginPath();
+      ctx.arc(0, 0, e.radius, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    // Red engine glow — mirrors the player's white one. Drawn on top of
+    // the hull so it reads as light spilling from the engine bell.
+    if (e.thrusting) {
+      ctx.save();
+      ctx.translate(sp.x, sp.y);
+      ctx.rotate(e.heading);
+      const flicker = 0.85 + Math.random() * 0.3;
+      const cx = -e.spriteSize * 0.32;
+      const r  =  e.spriteSize * 0.16 * flicker;
+      const g = ctx.createRadialGradient(cx, 0, 0, cx, 0, r);
+      g.addColorStop(0,   "rgba(255,230,180,0.95)");
+      g.addColorStop(0.5, "rgba(255,80,50,0.45)");
+      g.addColorStop(1,   "rgba(200,30,30,0)");
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(cx, 0, r, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    // Hit flash — bright additive flare over the hull when shot.
+    if (e.hitFlash > 0) {
+      const k = Math.max(0, Math.min(1, e.hitFlash / 0.15));
+      ctx.save();
+      ctx.globalCompositeOperation = "lighter";
+      const g = ctx.createRadialGradient(sp.x, sp.y, 0, sp.x, sp.y, e.radius * 1.3);
+      g.addColorStop(0, `rgba(255,210,120,${0.85 * k})`);
+      g.addColorStop(1, "rgba(255,140,40,0)");
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(sp.x, sp.y, e.radius * 1.3, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+  }
+}
+
+// Subtle dashed outline of the ±halfCone firing arc. Always visible so
+// the player has a constant readout of where they can shoot without
+// having to rotate. Drawn from the muzzle position out to the same
+// distance as the reticle, with an arc closing the far end.
+function drawAimCone() {
+  if (!mouse.down) return;
+  const muzzleDist = ship.spriteSize * weapon.muzzleForward;
+  const reachDist  = ship.spriteSize * weapon.reticleDistance;
+  const cosH = Math.cos(ship.heading);
+  const sinH = Math.sin(ship.heading);
+  const ox = ship.x + cosH * muzzleDist;
+  const oy = ship.y + sinH * muzzleDist;
+  const sp = worldToScreen(ox, oy);
+
+  const leftA  = ship.heading - weapon.halfCone;
+  const rightA = ship.heading + weapon.halfCone;
+  const lx = sp.x + Math.cos(leftA)  * reachDist;
+  const ly = sp.y + Math.sin(leftA)  * reachDist;
+  const rx = sp.x + Math.cos(rightA) * reachDist;
+  const ry = sp.y + Math.sin(rightA) * reachDist;
+
+  ctx.save();
+  ctx.strokeStyle = "rgba(255,255,255,0.22)";
+  ctx.lineWidth = 1.2;
+  ctx.setLineDash([5, 5]);
+  ctx.beginPath();
+  ctx.moveTo(sp.x, sp.y); ctx.lineTo(lx, ly);
+  ctx.moveTo(sp.x, sp.y); ctx.lineTo(rx, ry);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.arc(sp.x, sp.y, reachDist, leftA, rightA);
+  ctx.stroke();
+  ctx.restore();
+}
+
+// Floating reticle that shows where the cannon will actually fire.
+// Sits on the aim ray at a fixed distance in front of the ship. Turns
+// amber when the cursor has pushed past the cone edge, signaling that
+// the player needs to rotate the hull to keep tracking the target.
+function drawAimReticle() {
+  if (!mouse.down) return;
+  const mouseWorldX = mouse.x - viewW / 2 + camera.x;
+  const mouseWorldY = mouse.y - viewH / 2 + camera.y;
+  const mdx = mouseWorldX - ship.x;
+  const mdy = mouseWorldY - ship.y;
+  if (mdx * mdx + mdy * mdy < 400) return;  // hide when mouse is on the hull
+
+  const aim = computeAim();
+  // Anchor the reticle to the cone's arc — same origin (muzzle) and
+  // radius (reachDist) the cone outline uses, so the crosshair slides
+  // along the front edge of the cone instead of sitting short of it.
+  const muzzleDist = ship.spriteSize * weapon.muzzleForward;
+  const reachDist  = ship.spriteSize * weapon.reticleDistance;
+  const cosH = Math.cos(ship.heading);
+  const sinH = Math.sin(ship.heading);
+  const ox = ship.x + cosH * muzzleDist;
+  const oy = ship.y + sinH * muzzleDist;
+  const wx = ox + Math.cos(aim.angle) * reachDist;
+  const wy = oy + Math.sin(aim.angle) * reachDist;
+  const sp = worldToScreen(wx, wy);
+
+  ctx.save();
+  ctx.lineWidth = 1.4;
+  ctx.strokeStyle = aim.clamped ? "rgba(255,170,80,0.75)" : "rgba(255,255,255,0.55)";
+  ctx.beginPath();
+  ctx.arc(sp.x, sp.y, 10, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.beginPath();
+  ctx.moveTo(sp.x - 5, sp.y); ctx.lineTo(sp.x + 5, sp.y);
+  ctx.moveTo(sp.x, sp.y - 5); ctx.lineTo(sp.x, sp.y + 5);
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawProjectiles() {
+  ctx.save();
+  ctx.globalCompositeOperation = "lighter";
+  for (const p of projectiles) {
+    const sp = worldToScreen(p.x, p.y);
+    const k = Math.max(0, Math.min(1, p.life / p.maxLife));
+    const speed = Math.hypot(p.vx, p.vy) || 1;
+    const len = 16;
+    const dx = (p.vx / speed) * len;
+    const dy = (p.vy / speed) * len;
+    const grad = ctx.createLinearGradient(sp.x - dx, sp.y - dy, sp.x + dx * 0.4, sp.y + dy * 0.4);
+    grad.addColorStop(0,    "rgba(255,160,30,0)");
+    grad.addColorStop(0.55, `rgba(255,200,80,${0.55 * k})`);
+    grad.addColorStop(1,    `rgba(255,245,180,${0.95 * k})`);
+    ctx.strokeStyle = grad;
+    ctx.lineWidth = 2.4;
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    ctx.moveTo(sp.x - dx, sp.y - dy);
+    ctx.lineTo(sp.x + dx * 0.4, sp.y + dy * 0.4);
+    ctx.stroke();
+    ctx.fillStyle = `rgba(255,245,200,${0.95 * k})`;
+    ctx.beginPath();
+    ctx.arc(sp.x, sp.y, 2.6, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawShip() {
+  const sp = worldToScreen(ship.x, ship.y);
+  const boosting = keys["ShiftLeft"] || keys["ShiftRight"];
+
+  // ---- Hull. Use the prerendered sprite if loaded; otherwise fall back
+  // to a vector arrowhead so the ship stays visible while the image
+  // streams in.
+  if (shipSpriteReady) {
+    const frame = SHIP_SPRITE.frameForHeading(ship.heading);
+    const sx = (frame % SHIP_SPRITE.cols) * SHIP_SPRITE.frameSize;
+    const sy = Math.floor(frame / SHIP_SPRITE.cols) * SHIP_SPRITE.frameSize;
+    const size = ship.spriteSize;
+    // Sprite is pre-rotated — don't rotate the canvas under it.
+    ctx.drawImage(shipSprite,
+      sx, sy, SHIP_SPRITE.frameSize, SHIP_SPRITE.frameSize,
+      sp.x - size / 2, sp.y - size / 2, size, size);
+  } else {
+    ctx.save();
+    ctx.translate(sp.x, sp.y);
+    ctx.rotate(ship.heading);
+    ctx.beginPath();
+    ctx.moveTo( ship.radius * 1.25, 0);
+    ctx.lineTo(-ship.radius * 0.85,  ship.radius * 0.9);
+    ctx.lineTo(-ship.radius * 0.45,  0);
+    ctx.lineTo(-ship.radius * 0.85, -ship.radius * 0.9);
+    ctx.closePath();
+    const hullGrad = ctx.createLinearGradient(-ship.radius, 0, ship.radius, 0);
+    hullGrad.addColorStop(0, "#1b3550");
+    hullGrad.addColorStop(1, "#a8e6ff");
+    ctx.fillStyle = hullGrad;
+    ctx.fill();
+    ctx.lineWidth = 1.4;
+    ctx.strokeStyle = "#cfeeff";
+    ctx.stroke();
+    ctx.restore();
+  }
+
+  // ---- Engine glow. Drawn AFTER the hull so it sits on top — the
+  // glow reads as light spilling out of the engine bells rather than
+  // a halo trailing the ship. Small and tight, tracking the engines
+  // in the rotated frame.
+  if (keys["KeyW"] || keys["ArrowUp"]) {
+    ctx.save();
+    ctx.translate(sp.x, sp.y);
+    ctx.rotate(ship.heading);
+    const flicker = 0.85 + Math.random() * 0.3;
+    const scale = boosting ? 1.4 : 1.0;
+    const cx = -ship.spriteSize * 0.32;
+    const r  =  ship.spriteSize * 0.16 * flicker * scale;
+    const g = ctx.createRadialGradient(cx, 0, 0, cx, 0, r);
+    g.addColorStop(0,   "rgba(255,255,255,0.95)");
+    g.addColorStop(0.5, "rgba(220,235,255,0.40)");
+    g.addColorStop(1,   "rgba(180,210,255,0)");
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(cx, 0, r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+}
+
+function drawVelocityVector() {
+  // A faint line showing actual velocity direction — vital UX for a
+  // Newtonian flight model so the player can see how their momentum
+  // differs from their facing.
+  const sp = worldToScreen(ship.x, ship.y);
+  const speed = Math.hypot(ship.vx, ship.vy);
+  if (speed < 4) return;
+  const len = Math.min(120, speed * 0.4);
+  const ang = Math.atan2(ship.vy, ship.vx);
+  const ex = sp.x + Math.cos(ang) * len;
+  const ey = sp.y + Math.sin(ang) * len;
+  ctx.save();
+  ctx.strokeStyle = "rgba(120,255,180,0.55)";
+  ctx.lineWidth = 1.2;
+  ctx.setLineDash([4, 6]);
+  ctx.beginPath();
+  ctx.moveTo(sp.x, sp.y);
+  ctx.lineTo(ex, ey);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  // Arrowhead
+  ctx.fillStyle = "rgba(120,255,180,0.85)";
+  ctx.beginPath();
+  ctx.moveTo(ex, ey);
+  ctx.lineTo(ex - Math.cos(ang - 0.4) * 8, ey - Math.sin(ang - 0.4) * 8);
+  ctx.lineTo(ex - Math.cos(ang + 0.4) * 8, ey - Math.sin(ang + 0.4) * 8);
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+}
+
+// ---------------------------------------------------------------------------
+// HUD
+// ---------------------------------------------------------------------------
+const hudSpeed = document.getElementById("hud-speed");
+const hudHeading = document.getElementById("hud-heading");
+const hudPos = document.getElementById("hud-pos");
+
+function updateHud() {
+  const speed = Math.hypot(ship.vx, ship.vy);
+  hudSpeed.textContent = speed.toFixed(1);
+  const hDeg = ((ship.heading * 180 / Math.PI) % 360 + 360) % 360;
+  hudHeading.textContent = hDeg.toFixed(0) + "°";
+  hudPos.textContent = ship.x.toFixed(0) + ", " + ship.y.toFixed(0);
+}
+
+// ---------------------------------------------------------------------------
+// Main loop with fixed-timestep physics
+// ---------------------------------------------------------------------------
+let lastT = performance.now();
+let accum = 0;
+const FIXED_DT = 1 / 120;
+const MAX_FRAME_DT = 1 / 20;
+
+function frame(now) {
+  let dt = (now - lastT) / 1000;
+  lastT = now;
+  if (dt > MAX_FRAME_DT) dt = MAX_FRAME_DT;
+  accum += dt;
+  while (accum >= FIXED_DT) {
+    updateShip(FIXED_DT);
+    updateAsteroids(FIXED_DT);
+    updateEnemies(FIXED_DT);
+    updateWeapons(FIXED_DT);
+    updateProjectiles(FIXED_DT);
+    updateParticles(FIXED_DT);
+    updateTrail(FIXED_DT);
+    updateCamera(FIXED_DT);
+    accum -= FIXED_DT;
+  }
+
+  // Render
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, viewW, viewH);
+  drawNebulas();
+  drawStars();
+  drawAsteroids();
+  drawEnemies();
+  drawTrail();
+  drawParticles();
+  drawShip();
+  drawAimCone();
+  drawAimReticle();
+  drawProjectiles();
+
+  updateHud();
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
