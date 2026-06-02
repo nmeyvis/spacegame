@@ -144,8 +144,7 @@
   <kbd>R</kbd> reload &nbsp;
   <kbd>1</kbd> cannon &nbsp;
   <kbd>2</kbd>/<kbd>F</kbd> launch torpedoes &nbsp;
-  <kbd>3</kbd>/<kbd>G</kbd> drop seismic charge &nbsp;
-  <kbd>4</kbd> toggle auto-missiles
+  <kbd>3</kbd>/<kbd>G</kbd> drop seismic charge
 </div>
 
 <script>
@@ -883,15 +882,8 @@ const weapons = [
     name: "SEISMIC CHARGE",
     type: "bomb",
     maxAmmo: 1,
-    reloadTime: 15,
+    reloadTime: 20,
     fireRate: 1.2,                // deploy gate (~0.8s between drops)
-  }),
-  makeWeapon({
-    name: "SWARM MISSILES",
-    type: "auto",                 // toggle on with 4; auto-fires while armed
-    maxAmmo: 6,                   // volleys before reload
-    reloadTime: 6,
-    fireRate: 1.4,                // volleys per second while armed
   }),
 ];
 
