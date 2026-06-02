@@ -33,6 +33,63 @@
   #hud .row { display: flex; gap: 6px; align-items: baseline; }
   #hud .lbl { color: #6cc; width: 70px; }
   #hud .val { color: #cfe; }
+  .hud-bar {
+    display: inline-block;
+    width: 120px;
+    height: 8px;
+    border: 1px solid #356;
+    border-radius: 3px;
+    margin-left: 4px;
+    align-self: center;
+    overflow: hidden;
+    background: rgba(20,40,60,0.6);
+  }
+  .hud-bar > span {
+    display: block;
+    height: 100%;
+    width: 100%;
+    transition: width 0.15s linear;
+  }
+  #hud-healthbar-fill {
+    background: linear-gradient(90deg, #2fe6a0, #6cffd0);
+  }
+  #hud-shieldbar-fill {
+    background: linear-gradient(90deg, #2f9be6, #6cd0ff);
+  }
+  #mission {
+    position: fixed;
+    top: 12px;
+    right: 16px;
+    width: 230px;
+    pointer-events: none;
+    font-size: 13px;
+    line-height: 1.5;
+    text-shadow: 0 0 6px #0af;
+    background: rgba(8,16,28,0.55);
+    border: 1px solid rgba(80,130,170,0.45);
+    border-radius: 6px;
+    padding: 10px 12px;
+  }
+  #mission .mtitle {
+    color: #9fe;
+    font-weight: 600;
+    letter-spacing: 1px;
+    margin-bottom: 2px;
+  }
+  #mission .mobj {
+    color: #7bd;
+    font-size: 11px;
+    margin-bottom: 8px;
+    opacity: 0.85;
+  }
+  #mission .mrow {
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  #mission .mrow .lbl { color: #6cc; }
+  #mission .mrow .val { color: #cfe; }
+  #mission .mrow .val.done { color: #6fffb0; }
   #help {
     position: fixed;
     bottom: 14px;
@@ -57,9 +114,23 @@
 <body>
 <canvas id="game"></canvas>
 <div id="hud">
+  <div class="row"><span class="lbl">SHIELD</span><span class="val" id="hud-shield">60</span>
+    <span class="hud-bar" id="hud-shieldbar"><span id="hud-shieldbar-fill"></span></span>
+  </div>
+  <div class="row"><span class="lbl">HULL</span><span class="val" id="hud-health">100</span>
+    <span class="hud-bar" id="hud-healthbar"><span id="hud-healthbar-fill"></span></span>
+  </div>
   <div class="row"><span class="lbl">SPEED</span><span class="val" id="hud-speed">0.0</span></div>
   <div class="row"><span class="lbl">HEADING</span><span class="val" id="hud-heading">0°</span></div>
   <div class="row"><span class="lbl">POS</span><span class="val" id="hud-pos">0, 0</span></div>
+</div>
+<div id="mission">
+  <div class="mtitle">MISSION</div>
+  <div class="mobj">Eliminate all heavy cruisers. Fighters keep coming until the cruisers are down.</div>
+  <div class="mrow"><span class="lbl">CRUISERS</span><span class="val" id="m-cruisers">0 / 3</span></div>
+  <div class="mrow"><span class="lbl">FIGHTERS DOWN</span><span class="val" id="m-fighters">0</span></div>
+  <div class="mrow"><span class="lbl">NEXT REINFORCEMENTS</span><span class="val" id="m-replenish">25.0s</span></div>
+  <div class="mrow"><span class="lbl">TIME</span><span class="val" id="m-time">0:00.0</span></div>
 </div>
 <div id="help">
   <kbd>W</kbd> thrust &nbsp;
@@ -67,8 +138,13 @@
   <kbd>A</kbd>/<kbd>D</kbd> steer &nbsp;
   <kbd>Space</kbd> drift (free-rotate) &nbsp;
   <kbd>Shift</kbd> boost &nbsp;
-  <kbd>Mouse</kbd> aim cone &nbsp;
-  <kbd>Click</kbd> fire
+  <kbd>Click</kbd> fire (straight) &nbsp;
+  <kbd>Right-click</kbd> aim within cone &nbsp;
+  <kbd>R</kbd> reload &nbsp;
+  <kbd>1</kbd> cannon &nbsp;
+  <kbd>2</kbd>/<kbd>F</kbd> launch torpedoes &nbsp;
+  <kbd>3</kbd>/<kbd>G</kbd> drop seismic charge &nbsp;
+  <kbd>4</kbd> toggle auto-missiles
 </div>
 
 <script>
@@ -103,19 +179,29 @@ window.addEventListener("keydown", e => {
   if (["Space","ArrowUp","ArrowDown","ArrowLeft","ArrowRight"].includes(e.code)) e.preventDefault();
 });
 window.addEventListener("keyup",   e => { keys[e.code] = false; });
-window.addEventListener("blur",    () => { for (const k in keys) keys[k] = false; mouse.down = false; });
+window.addEventListener("blur",    () => { for (const k in keys) keys[k] = false; mouse.down = false; mouse.right = false; });
 
-const mouse = { x: viewW / 2, y: viewH / 2, down: false };
+// down = left button (fire). right = right button (engage manual aim:
+// while held, the mouse steers the shot within the firing cone; otherwise
+// the cannon fires straight along the hull).
+const mouse = { x: viewW / 2, y: viewH / 2, down: false, right: false };
 canvas.addEventListener("mousemove", e => {
   const rect = canvas.getBoundingClientRect();
   mouse.x = e.clientX - rect.left;
   mouse.y = e.clientY - rect.top;
 });
 canvas.addEventListener("mousedown", e => {
-  if (e.button === 0) { mouse.down = true; e.preventDefault(); }
+  // Click anywhere on the victory screen to restart.
+  if (mission.state === "won") {
+    if (e.button === 0) { restartGame(); e.preventDefault(); }
+    return;
+  }
+  if (e.button === 0)      { mouse.down = true;  e.preventDefault(); }
+  else if (e.button === 2) { mouse.right = true; e.preventDefault(); }
 });
 window.addEventListener("mouseup", e => {
-  if (e.button === 0) mouse.down = false;
+  if (e.button === 0)      mouse.down = false;
+  else if (e.button === 2) mouse.right = false;
 });
 canvas.addEventListener("contextmenu", e => e.preventDefault());
 
@@ -148,7 +234,7 @@ const ship = {
 
   // Speed limits — dynamic so Shift can push you above the normal cap.
   maxSpeed: 360,         // baseline cap on linear speed (px/s)
-  boostMaxSpeed: 600,    // ceiling while Shift is held
+  boostMaxSpeed: 675,    // ceiling while Shift is held
   boostDecayRate: 1.6,   // 1/s — how fast the cap returns after Shift release
   currentCap: 360,       // live cap (mutated each tick — start at baseline)
 
@@ -169,6 +255,29 @@ const ship = {
   // input so that sub-step slews still advance the heading instead of
   // being silently rounded away.
   headingAccum: 0,
+
+  // Survivability. health drops when hit by enemy fire or a ship
+  // collision; at zero the player ship is destroyed and respawns at the
+  // origin after a short delay. hitFlash drives the damage flash overlay,
+  // invuln gives brief i-frames after respawn so you don't die instantly
+  // in a crossfire.
+  maxHealth: 100,
+  health: 100,
+  hitFlash: 0,
+  invuln: 0,
+  respawnTimer: 0, // >0 while dead and waiting to respawn
+
+  // Shield. A regenerating buffer that soaks damage before the hull does.
+  // It stops regenerating the instant you're hit and only resumes after
+  // `shieldRegenDelay` seconds without taking damage — i.e. once you've
+  // broken off the engagement. shieldHitFlash drives the bubble flare.
+  maxShield: 60,
+  shield: 60,
+  shieldRegenRate: 18,      // shield points restored per second once regenerating
+  shieldRegenDelay: 4.0,    // seconds out of combat before regen kicks in
+  outOfCombat: 0,           // seconds since the last damage was taken
+  shieldHitFlash: 0,        // brief flare when the shield absorbs a hit
+  shieldBreakFlash: 0,      // bigger flare the moment the shield drops to 0
 };
 
 // Prerendered ship sprite sheet — 6×6 grid (last 4 cells empty) of
@@ -196,6 +305,16 @@ let enemySpriteReady = false;
 enemySprite.addEventListener("load",  () => { enemySpriteReady = true; });
 enemySprite.addEventListener("error", () => { console.warn("enemy sprite failed to load"); });
 enemySprite.src = "prerenderedships-v1/thirtytwo/terrok2.png";
+
+// Colony4 — used by the slow, shielded cruiser enemy. Same 32-direction
+// frame layout, so it shares SHIP_SPRITE.frameForHeading.
+const colonySprite = new Image();
+colonySprite.addEventListener("error", () => { console.warn("colony sprite failed to load"); });
+colonySprite.src = "prerenderedships-v1/thirtytwo/colony4.png";
+
+// True once a loaded <img> actually has pixels (works per-sprite without a
+// separate ready flag for every new enemy type).
+const spriteLoaded = img => img.complete && img.naturalWidth > 0;
 
 // Heading lives on a discrete grid so the ship orientation is fully
 // deterministic — left-then-right-then-left always returns to the same
@@ -345,50 +464,222 @@ function drawTrail() {
 // physics call is identical to the player's.
 // ---------------------------------------------------------------------------
 const enemies = [];
-const enemyConfig = {
-  count: 6,
-  health: 3,
-  radius: 35,
-  spriteSize: 120,
-  spawnMin: 900,
-  spawnVary: 500,
-  // Per-enemy flight model, copied onto each spawned enemy so applyShipPhysics
-  // can read the constants directly off the entity.
-  flight: {
-    mass: 1.0,
-    mainThrust: 380,
-    retroThrust: 240,
-    lateralThrust: 950,
-    turnRateRest: 2.0,
-    linearDrag: 0.45,
-    maxSpeed: 270,
-    boostMaxSpeed: 270,   // enemies don't boost
-    boostDecayRate: 1.6,
-    alignSpeed: 5,
+
+// Where new enemies appear relative to the player.
+const ENEMY_SPAWN = { min: 900, vary: 500 };
+
+// Enemy archetypes. Each carries a flight model (same field names as the
+// player ship), an AI tuning block, and a gun. A non-zero `maxShield`
+// gives the unit a regenerating shield that works exactly like the
+// player's — it soaks damage before the hull and recharges out of combat.
+const ENEMY_TYPES = {
+  // Fast, fragile interceptor (terrok2). No shield.
+  fighter: {
+    sprite: enemySprite,
+    health: 3,
+    radius: 35,
+    spriteSize: 120,
+    maxShield: 0,
+    flight: {
+      mass: 1.0, mainThrust: 380, retroThrust: 240, lateralThrust: 950,
+      turnRateRest: 2.0, linearDrag: 0.45, maxSpeed: 270, boostMaxSpeed: 270,
+      boostDecayRate: 1.6, alignSpeed: 5,
+    },
+    ai: { facingTolerance: 0.55, minThrustDist: 280, brakeDist: 220, brakeClosingSpeed: 40 },
+    fire: {
+      range: 640, aimTolerance: 0.30, fireRate: 0.85, projectileSpeed: 700,
+      projectileLifetime: 1.9, damage: 9, spread: 0.05, muzzleForward: 0.34,
+    },
   },
-  ai: {
-    facingTolerance: 0.55, // rad — must be aimed this close to thrust
-    minThrustDist: 280,    // don't burn engines when this close (avoids ramming)
-    brakeDist: 220,        // brake when this close and closing fast
-    brakeClosingSpeed: 40, // px/s of approach speed required to trigger brake
+
+  // Slow, heavy shielded cruiser (colony4). Lumbers in, keeps its distance,
+  // and rides a regenerating shield — you have to break the shield before
+  // the hull takes damage, or pop it with a seismic charge.
+  cruiser: {
+    sprite: colonySprite,
+    health: 15,
+    radius: 56,
+    spriteSize: 196,
+    maxShield: 40,            // player-style regenerating buffer
+    shieldRegenRate: 12,      // points/sec once out of combat
+    shieldRegenDelay: 6.0,    // seconds without damage before regen resumes
+    flight: {
+      mass: 3.2, mainThrust: 170, retroThrust: 120, lateralThrust: 360,
+      turnRateRest: 1.1, linearDrag: 0.5, maxSpeed: 110, boostMaxSpeed: 110,
+      boostDecayRate: 1.6, alignSpeed: 5,
+    },
+    ai: { facingTolerance: 0.6, minThrustDist: 380, brakeDist: 320, brakeClosingSpeed: 28 },
+    fire: {
+      range: 780, aimTolerance: 0.34, fireRate: 0.6, projectileSpeed: 620,
+      projectileLifetime: 2.3, damage: 14, spread: 0.04, muzzleForward: 0.3,
+    },
+    // Torpedo launcher — the cruiser's anti-shield answer to the player's.
+    // Slow, dumb-fire volleys aimed at the player; heavy shield damage.
+    torpedo: {
+      interval: 6,           // seconds between volleys
+      volley: 3,
+      speed: 380,            // faster
+      lifetime: 6.0,         // longer-lived
+      spread: Math.PI / 16,  // tight fan
+      range: 1400,           // fire when the player is within this
+      shieldDamage: 26,      // high vs the player's shield
+      hullDamage: 11,        // low vs hull
+    },
   },
 };
 
-function spawnEnemy() {
+// ---------------------------------------------------------------------------
+// Mission. Objective: destroy all the heavy cruisers. Fighters keep
+// reinforcing (up to a live cap) until every cruiser is gone, at which point
+// the mission is won. Tracks elapsed time for the end screen.
+// ---------------------------------------------------------------------------
+const MISSION = {
+  totalCruisers: 3,        // win when all of these are destroyed
+  fighterCap: 4,           // fixed number of active fighters at a time
+  replenishInterval: 25,   // seconds between topping fighters back up to the cap
+};
+const mission = {
+  state: "active",         // "active" | "won"
+  elapsed: 0,              // seconds since start (frozen on win)
+  cruisersDestroyed: 0,
+  fightersDestroyed: 0,
+  replenishTimer: 25,      // countdown to the next fighter replenish
+};
+
+// Hostile projectiles fired by enemies. Kept in their own pool so they
+// only ever test against the player and asteroids (never other enemies),
+// and so they can be drawn in a distinct hostile-red color.
+const enemyProjectiles = [];
+
+// Hostile torpedoes (cruiser anti-shield weapon) — slow, straight-line,
+// heavy shield damage. Separate pool so they get their own visuals/logic.
+const enemyTorpedoes = [];
+
+// How far out from the ship's center (in hull radii) the deflector
+// catches incoming bolts. There's no visible bubble anymore — the shield
+// shows as a glow on the hull itself — so this is purely the catch range.
+const SHIELD_RADIUS_MULT = 1.55;
+
+// Short-lived flares spawned where the shield catches a bolt. Each is a
+// localized ripple on the bubble surface (position + outward normal).
+const shieldImpacts = [];
+function emitShieldImpact(x, y, nx, ny) {
+  shieldImpacts.push({ x, y, nx, ny, life: 0.35, maxLife: 0.35 });
+  // Sparks spray back outward along the shield surface, tinted shield-blue.
+  const baseAng = Math.atan2(ny, nx);
+  for (let i = 0; i < 11; i++) {
+    const a = baseAng + (Math.random() - 0.5) * 2.4;
+    const sp = 70 + Math.random() * 230;
+    particles.push({
+      x, y,
+      vx: Math.cos(a) * sp,
+      vy: Math.sin(a) * sp,
+      life: 0.18 + Math.random() * 0.26,
+      maxLife: 0.44,
+      hue: 200 + Math.random() * 28,
+      size: 1.3 + Math.random() * 1.8,
+    });
+  }
+}
+
+function updateShieldImpacts(dt) {
+  for (let i = shieldImpacts.length - 1; i >= 0; i--) {
+    shieldImpacts[i].life -= dt;
+    if (shieldImpacts[i].life <= 0) shieldImpacts.splice(i, 1);
+  }
+}
+
+// Floating combat numbers that pop off anything that takes damage. They
+// rise, drift, and fade. Colored by what was hit: cyan = shield absorbed,
+// amber = hull, red = the player. Bigger hits print bigger.
+const damageNumbers = [];
+const DMG_COLORS = {
+  shield: [150, 215, 255],
+  hull:   [255, 232, 150],
+  player: [255, 120, 120],
+};
+function spawnDamageNumber(x, y, amount, kind) {
+  amount = Math.round(amount);
+  if (amount <= 0) return;
+  damageNumbers.push({
+    x: x + (Math.random() - 0.5) * 16,
+    y,
+    vx: (Math.random() - 0.5) * 28,
+    vy: -70 - Math.random() * 30,        // floats up (screen y grows downward)
+    life: 0.8, maxLife: 0.8,
+    amount,
+    color: DMG_COLORS[kind] || DMG_COLORS.hull,
+    size: 22 + Math.min(34, amount * 0.7),  // scale with magnitude
+  });
+}
+
+function updateDamageNumbers(dt) {
+  for (let i = damageNumbers.length - 1; i >= 0; i--) {
+    const d = damageNumbers[i];
+    d.life -= dt;
+    if (d.life <= 0) { damageNumbers.splice(i, 1); continue; }
+    d.x += d.vx * dt;
+    d.y += d.vy * dt;
+    d.vy += 50 * dt;                       // ease the rise to a stop
+    d.vx *= Math.exp(-2 * dt);
+  }
+}
+
+function drawDamageNumbers() {
+  ctx.save();
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  for (const d of damageNumbers) {
+    const sp = worldToScreen(d.x, d.y);
+    const k = Math.max(0, d.life / d.maxLife);
+    const rise = 1 - k;                    // pop in slightly larger as it ages
+    const [r, g, b] = d.color;
+    ctx.font = `600 ${(d.size * (0.85 + 0.15 * rise)).toFixed(1)}px ui-monospace, Consolas, monospace`;
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = `rgba(0,0,0,${0.55 * k})`;
+    ctx.strokeText(d.amount, sp.x, sp.y);
+    ctx.fillStyle = `rgba(${r},${g},${b},${k})`;
+    ctx.fillText(d.amount, sp.x, sp.y);
+  }
+  ctx.restore();
+}
+
+function spawnEnemy(typeKey) {
+  const type = ENEMY_TYPES[typeKey];
   const a = Math.random() * Math.PI * 2;
-  const d = enemyConfig.spawnMin + Math.random() * enemyConfig.spawnVary;
-  const f = enemyConfig.flight;
+  const d = ENEMY_SPAWN.min + Math.random() * ENEMY_SPAWN.vary;
+  const f = type.flight;
   enemies.push({
+    typeKey,
+    sprite: type.sprite,
     x: ship.x + Math.cos(a) * d,
     y: ship.y + Math.sin(a) * d,
     vx: 0, vy: 0,
     heading: snapHeading(a + Math.PI),
     headingAccum: 0,
-    health: enemyConfig.health,
+    health: type.health,
+    maxHealth: type.health,
     hitFlash: 0,
     stun: 0,
-    radius: enemyConfig.radius,
-    spriteSize: enemyConfig.spriteSize,
+    // Shield (0 maxShield = no shield). Mirrors the player's fields so the
+    // regen/absorb logic reads identically.
+    maxShield: type.maxShield || 0,
+    shield: type.maxShield || 0,
+    shieldRegenRate: type.shieldRegenRate || 0,
+    shieldRegenDelay: type.shieldRegenDelay || 0,
+    outOfCombat: type.shieldRegenDelay || 0,
+    shieldHitFlash: 0,
+    shieldBreakFlash: 0,
+    // Gun + AI configs (referenced, not copied).
+    fire: type.fire,
+    ai: type.ai,
+    // Optional torpedo launcher (cruisers only).
+    torpedo: type.torpedo || null,
+    torpedoCooldown: type.torpedo ? 2 + Math.random() * type.torpedo.interval : 0,
+    // Seed each gun's cooldown randomly so the squad doesn't fire in lockstep.
+    fireCooldown: 0.4 + Math.random() * (1 / type.fire.fireRate),
+    radius: type.radius,
+    spriteSize: type.spriteSize,
     // Flight model — same field names as the player ship.
     mass: f.mass,
     mainThrust: f.mainThrust,
@@ -402,6 +693,26 @@ function spawnEnemy() {
     currentCap: f.maxSpeed,
     alignSpeed: f.alignSpeed,
   });
+}
+
+// Apply `amount` damage to an enemy, routed through its shield first (if it
+// has one) exactly like the player's. Resets the regen clock on any hit and
+// flags the shield flares so drawEnemies can render them.
+function damageEnemy(e, amount) {
+  e.outOfCombat = 0;
+  const top = e.y - e.radius * 0.8;
+  if (e.shield > 0) {
+    const absorbed = Math.min(e.shield, amount);
+    e.shield -= absorbed;
+    amount -= absorbed;
+    e.shieldHitFlash = 0.25;
+    if (e.shield <= 0) { e.shield = 0; e.shieldBreakFlash = 0.5; }
+    spawnDamageNumber(e.x, top, absorbed, "shield");
+  }
+  if (amount > 0) {
+    e.health -= amount;
+    spawnDamageNumber(e.x, top, amount, "hull");
+  }
 }
 
 function explodeEnemy(e) {
@@ -420,27 +731,875 @@ function explodeEnemy(e) {
   }
 }
 
+// Scatter a burst of debris when the player ship is destroyed — same
+// idea as explodeEnemy but bigger and tinted to read as the hero ship
+// blowing apart.
+function explodeShip() {
+  for (let i = 0; i < 48; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const sp = 80 + Math.random() * 320;
+    particles.push({
+      x: ship.x, y: ship.y,
+      vx: ship.vx * 0.3 + Math.cos(a) * sp,
+      vy: ship.vy * 0.3 + Math.sin(a) * sp,
+      life: 0.5 + Math.random() * 0.7,
+      maxLife: 1.2,
+      hue: 180 + Math.random() * 40,
+      size: 1.8 + Math.random() * 2.8,
+    });
+  }
+}
+
+// Apply `amount` damage to the player, with an optional knockback impulse
+// along (kx, ky). Ignored while the ship is invulnerable (post-respawn
+// i-frames) or already destroyed. Triggers the damage flash and, at zero
+// health, the death sequence.
+function damagePlayer(amount, kx = 0, ky = 0) {
+  if (ship.invuln > 0 || ship.respawnTimer > 0) return;
+
+  // Any hit interrupts shield regen, whether or not the shield is up.
+  ship.outOfCombat = 0;
+  ship.vx += kx;
+  ship.vy += ky;
+
+  const top = ship.y - ship.radius * 0.8;
+
+  // The shield soaks damage first; only the overflow reaches the hull.
+  if (ship.shield > 0) {
+    const absorbed = Math.min(ship.shield, amount);
+    ship.shield -= absorbed;
+    amount -= absorbed;
+    ship.shieldHitFlash = 0.25;
+    if (ship.shield <= 0) {
+      ship.shield = 0;
+      ship.shieldBreakFlash = 0.5; // shield just collapsed
+    }
+    spawnDamageNumber(ship.x, top, absorbed, "shield");
+  }
+
+  if (amount <= 0) return; // fully absorbed — hull untouched
+
+  ship.health -= amount;
+  ship.hitFlash = 0.18;
+  spawnDamageNumber(ship.x, top, amount, "player");
+  if (ship.health <= 0) {
+    ship.health = 0;
+    explodeShip();
+    ship.respawnTimer = 2.0;
+  }
+}
+
+// Bring the ship back at the origin, at rest, with full health and a
+// window of i-frames so the player isn't immediately re-killed.
+function respawnPlayer() {
+  ship.x = 0; ship.y = 0;
+  ship.vx = 0; ship.vy = 0;
+  ship.health = ship.maxHealth;
+  ship.shield = ship.maxShield;
+  ship.outOfCombat = ship.shieldRegenDelay; // ready to regen immediately
+  ship.heading = -Math.PI / 2;
+  ship.headingAccum = 0;
+  ship.invuln = 2.5;
+  ship.hitFlash = 0;
+  ship.shieldHitFlash = 0;
+  ship.shieldBreakFlash = 0;
+  // Clear hostile fire so respawn isn't into a wall of bullets.
+  enemyProjectiles.length = 0;
+  enemyTorpedoes.length = 0;
+  // Death resets the enemy forces — the wave (and cruiser objective) restart.
+  enemies.length = 0;
+  mission.cruisersDestroyed = 0;
+  mission.replenishTimer = MISSION.replenishInterval;
+  spawnInitialEnemies();
+}
+
 // ---------------------------------------------------------------------------
-// Weapons — left/right side cannons with a forward-fanning spread.
-// Mouse position decides which side is "armed". Only one side can fire
-// at a time; the spread is biased outward from the ship so the burst
-// visibly comes off the chosen flank.
+// Weapons — a list of weapon instances shown in the bottom hotbar. Each
+// has its own ammo pool and reload timer: firing drains ammo, and once a
+// magazine is spent the weapon auto-reloads over `reloadTime` seconds
+// (R reloads early). The fire mechanics (straight by default, cone aim on
+// right-click) are unchanged — they just read from the active weapon.
 // ---------------------------------------------------------------------------
 const projectiles = [];
-const weapon = {
-  fireRate: 7,                  // shots per second while left-click is held
-  cooldown: 0,
-  projectileSpeed: 1300,        // px/s, added to ship velocity at fire time
-  projectileLifetime: 1.4,
-  muzzleForward: 0.42,          // forward offset from center (× ship.spriteSize)
-  halfCone: Math.PI / 12,       // ±15° aim cone around ship.heading (30° total)
-  reticleDistance: 1.5,         // reticle pos along aim, in spriteSize units
+
+function makeWeapon(def) {
+  return {
+    name: def.name,
+    type: def.type || "gun",    // "gun" fires on click; "bomb" deploys on its hotkey
+    maxAmmo: def.maxAmmo,
+    ammo: def.maxAmmo,
+    reloadTime: def.reloadTime,
+    reloadTimer: 0,             // counts down while reloading (0 = ready/idle)
+    reloading: false,
+    active: !!def.active,       // for "auto" weapons: armed and self-firing
+    cooldown: 0,                // per-shot fire-rate gate
+    fireRate: def.fireRate,
+    projectileSpeed: def.projectileSpeed,
+    projectileLifetime: def.projectileLifetime,
+    muzzleForward: def.muzzleForward,
+    halfCone: def.halfCone,
+    reticleDistance: def.reticleDistance,
+  };
+}
+
+const weapons = [
+  makeWeapon({
+    name: "PULSE CANNON",
+    maxAmmo: 20,
+    reloadTime: 1,
+    fireRate: 7,                  // shots per second while left-click is held
+    projectileSpeed: 1300,        // px/s, added to ship velocity at fire time
+    projectileLifetime: 1.4,
+    muzzleForward: 0.42,          // forward offset from center (× ship.spriteSize)
+    halfCone: Math.PI / 12,       // ±15° aim cone around ship.heading (30° total)
+    reticleDistance: 1.5,         // reticle pos along aim, in spriteSize units
+  }),
+  makeWeapon({
+    name: "TORPEDOES",
+    type: "launcher",
+    maxAmmo: 4,                   // salvos
+    reloadTime: 2,
+    fireRate: 1.0,                // launch gate (~1s between volleys)
+  }),
+  makeWeapon({
+    name: "SEISMIC CHARGE",
+    type: "bomb",
+    maxAmmo: 1,
+    reloadTime: 8,
+    fireRate: 1.2,                // deploy gate (~0.8s between drops)
+  }),
+  makeWeapon({
+    name: "SWARM MISSILES",
+    type: "auto",                 // toggle on with 4; auto-fires while armed
+    maxAmmo: 6,                   // volleys before reload
+    reloadTime: 6,
+    fireRate: 1.4,                // volleys per second while armed
+  }),
+];
+
+// Secondary hotkeys per hotbar slot index (shown in the hotbar and wired in
+// the keydown handler) so deployables can be triggered without leaving WASD.
+const HOTBAR_SECONDARY = { 1: "F", 2: "G" };
+
+// The currently selected hotbar slot. `weapon` always points at it, so
+// all the existing weapon.* reads (aim cone, muzzle, reticle) keep working.
+let activeWeaponIndex = 0;
+let weapon = weapons[activeWeaponIndex];
+
+// Begin a reload on a weapon if it isn't full and isn't already reloading.
+function startReload(w) {
+  if (w.reloading || w.ammo >= w.maxAmmo) return;
+  w.reloading = true;
+  w.reloadTimer = w.reloadTime;
+}
+
+// Hotbar input: number keys select a slot (and bomb-type weapons deploy
+// the instant their key is pressed); R reloads the active weapon.
+window.addEventListener("keydown", e => {
+  if (e.repeat) return;
+  // On the victory screen, any of R / Enter / Space restarts the mission.
+  if (mission.state === "won") {
+    if (e.code === "KeyR" || e.code === "Enter" || e.code === "Space") restartGame();
+    return;
+  }
+  if (e.code === "KeyR") { startReload(weapon); return; }
+
+  // Number keys select/activate by slot; F and G are secondary hotkeys for
+  // slots 2 and 3 so the deployables can be triggered without leaving WASD.
+  const m = /^Digit([1-9])$/.exec(e.code);
+  if (m) { activateWeaponSlot(+m[1] - 1); return; }
+  if (e.code === "KeyF") { activateWeaponSlot(1); return; }
+  if (e.code === "KeyG") { activateWeaponSlot(2); return; }
+});
+
+// Trigger the weapon in hotbar slot `idx`. Deployable / single-use weapons
+// fire in place and leave the selected weapon untouched (so F/G or 2/3 lob a
+// charge without taking you off the cannon); only guns change the active slot.
+function activateWeaponSlot(idx) {
+  if (idx < 0 || idx >= weapons.length) return;
+  const target = weapons[idx];
+  if (target.type === "bomb") {
+    deploySeismicCharge(target);
+  } else if (target.type === "launcher") {
+    launchTorpedoes(target);
+  } else if (target.type === "auto") {
+    target.active = !target.active;   // toggle the auto-missile system
+  } else {
+    activeWeaponIndex = idx;
+    weapon = target;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Seismic charge — a dropped bomb that implodes then snaps outward as a
+// flat, razor-thin shockwave. Phase machine per bomb:
+//   drift  → heavy, tumbling coast away from the ship (release)
+//   charge → space pulls inward, core tightens (implosion)
+//   silence→ unnatural pause, tiny white-hot core
+//   detonate→ flat circular shockwave cuts outward, damaging on contact
+// then the bomb is removed and the scene clears fast. A delayed bass
+// boom plays at detonation.
+// ---------------------------------------------------------------------------
+const bombs = [];
+const SEISMIC = {
+  driftTime:    0.7,    // release → implosion
+  chargeTime:   0.28,   // inward compression
+  silenceTime:  0.14,   // the held beat
+  ringDuration: 0.6,    // shockwave small → huge
+  ringMaxR:     820,    // final radius (px)
+  ringThickness: 24,    // visual band width (the disk stays thin)
+  enemyDamage:  70,     // obliterates enemies caught in the wave
+  playerDamageMul: 0.45,// you take less from your own charge, but it stings
+  pushImpulse:  480,    // outward knockback applied on contact
+  releaseBackSpeed: 35, // backward jettison speed out the ship's tail
+  pullRadius:   270,    // how far the implosion tugs loose debris inward
 };
+
+// Lazy Web-Audio context for the detonation's delayed bass hit. Created on
+// first deploy (a keypress), which satisfies the autoplay gesture rule.
+let audioCtx = null;
+function getAudio() {
+  try {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === "suspended") audioCtx.resume();
+  } catch (_) { audioCtx = null; }
+  return audioCtx;
+}
+function playSeismicBoom() {
+  const ac = getAudio();
+  if (!ac) return;
+  const t0 = ac.currentTime + 0.12;            // boom arrives after the visual
+  // Deep sub sweep — the body of the boom.
+  const sub = ac.createOscillator(), subG = ac.createGain();
+  sub.type = "sine";
+  sub.frequency.setValueAtTime(120, t0);
+  sub.frequency.exponentialRampToValueAtTime(30, t0 + 0.55);
+  subG.gain.setValueAtTime(0.0001, t0);
+  subG.gain.exponentialRampToValueAtTime(0.7, t0 + 0.03);
+  subG.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.95);
+  sub.connect(subG).connect(ac.destination);
+  sub.start(t0); sub.stop(t0 + 1.0);
+  // Metallic bass tick — the sharp leading edge of the hit.
+  const tick = ac.createOscillator(), tickG = ac.createGain();
+  tick.type = "square";
+  tick.frequency.setValueAtTime(190, t0);
+  tick.frequency.exponentialRampToValueAtTime(55, t0 + 0.16);
+  tickG.gain.setValueAtTime(0.0001, t0);
+  tickG.gain.exponentialRampToValueAtTime(0.16, t0 + 0.01);
+  tickG.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.28);
+  tick.connect(tickG).connect(ac.destination);
+  tick.start(t0); tick.stop(t0 + 0.32);
+}
+
+function deploySeismicCharge(w) {
+  if (ship.respawnTimer > 0) return;
+  if (w.cooldown > 0 || w.reloading || w.ammo <= 0) return;
+
+  // Drop just behind the hull and jettison it straight out the tail. We
+  // deliberately do NOT inherit the ship's velocity — the charge is flung
+  // backward and left behind, so the player flies away from it rather than
+  // dragging it along in their direction of travel.
+  const cosH = Math.cos(ship.heading), sinH = Math.sin(ship.heading);
+  const bx = ship.x - cosH * ship.spriteSize * 0.36;
+  const by = ship.y - sinH * ship.spriteSize * 0.36;
+  bombs.push({
+    x: bx, y: by,
+    vx: -cosH * SEISMIC.releaseBackSpeed,
+    vy: -sinH * SEISMIC.releaseBackSpeed,
+    angle: ship.heading,
+    spin: (Math.random() - 0.5) * 2.4,        // slow tumble
+    phase: "drift",
+    timer: SEISMIC.driftTime,
+    flashTimer: 0.12,                          // mechanical release flash
+    detTimer: 0,
+    ringR: 0, prevRingR: 0,
+    hitEnemies: new Set(),
+    hitAsteroids: new Set(),
+    hitPlayer: false,
+  });
+
+  // Small release flash — a few white sparks where it detaches.
+  for (let i = 0; i < 6; i++) {
+    const a = Math.random() * Math.PI * 2, sp = 30 + Math.random() * 70;
+    particles.push({
+      x: bx, y: by, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+      life: 0.12 + Math.random() * 0.12, maxLife: 0.24,
+      hue: 210, size: 1 + Math.random() * 1.4,
+    });
+  }
+
+  w.ammo -= 1;
+  w.cooldown = 1 / w.fireRate;
+  if (w.ammo <= 0) startReload(w);
+}
+
+// Inward-rushing motes during the implosion: spawn on a ring and aim them
+// at the core so they streak inward and wink out near the center.
+function spawnImplosionParticles(b) {
+  for (let i = 0; i < 5; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const dist = 55 + Math.random() * 130;
+    const sp = 240 + Math.random() * 280;
+    particles.push({
+      x: b.x + Math.cos(a) * dist,
+      y: b.y + Math.sin(a) * dist,
+      vx: -Math.cos(a) * sp,
+      vy: -Math.sin(a) * sp,
+      life: 0.14 + Math.random() * 0.16, maxLife: 0.3,
+      hue: 198 + Math.random() * 34,
+      size: 1 + Math.random() * 1.5,
+    });
+  }
+}
+
+// Brief inward tug on nearby asteroids during the implosion.
+function pullDebris(b, dt) {
+  for (const a of asteroids) {
+    const dx = b.x - a.x, dy = b.y - a.y;
+    const d = Math.hypot(dx, dy);
+    if (d > 6 && d < SEISMIC.pullRadius) {
+      const f = (1 - d / SEISMIC.pullRadius) * 650;
+      a.vx += (dx / d) * f * dt;
+      a.vy += (dy / d) * f * dt;
+    }
+  }
+}
+
+// Pressure-cut sparks at a contact point — eject outward along the wave
+// normal, blue-white, short-lived (a clean slice, not a fireball).
+function emitSeismicContact(x, y, nx, ny) {
+  for (let i = 0; i < 11; i++) {
+    const a = Math.atan2(ny, nx) + (Math.random() - 0.5) * 1.1;
+    const sp = 130 + Math.random() * 300;
+    particles.push({
+      x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+      life: 0.14 + Math.random() * 0.2, maxLife: 0.34,
+      hue: 200 + Math.random() * 40,
+      size: 1.2 + Math.random() * 1.6,
+    });
+  }
+}
+
+// Apply damage/knockback to anything the ring's leading edge swept across
+// this frame — i.e. objects whose distance fell in (prevRingR, ringR].
+function applySeismicContacts(b) {
+  const r0 = b.prevRingR, r1 = b.ringR;
+  const swept = (x, y) => {
+    const d = Math.hypot(x - b.x, y - b.y);
+    return d > r0 && d <= r1 ? d : -1;
+  };
+
+  for (const e of enemies) {
+    if (b.hitEnemies.has(e)) continue;
+    const d = swept(e.x, e.y);
+    if (d < 0) continue;
+    b.hitEnemies.add(e);
+    const nx = (e.x - b.x) / (d || 1), ny = (e.y - b.y) / (d || 1);
+    e.vx += nx * SEISMIC.pushImpulse;
+    e.vy += ny * SEISMIC.pushImpulse;
+    if (e.shield > 0) {
+      // An active shield fully blocks the seismic shockwave — it flares
+      // and the ship is shoved, but takes no damage. Drop the shield with
+      // gunfire first to make the charge bite.
+      e.shieldHitFlash = 0.25;
+      e.outOfCombat = 0;
+    } else {
+      damageEnemy(e, SEISMIC.enemyDamage);
+      e.hitFlash = 0.2;
+    }
+    e.stun = Math.max(e.stun, 0.5);
+    emitSeismicContact(e.x, e.y, nx, ny);
+  }
+
+  for (const a of asteroids) {
+    if (b.hitAsteroids.has(a)) continue;
+    const d = swept(a.x, a.y);
+    if (d < 0) continue;
+    b.hitAsteroids.add(a);
+    const nx = (a.x - b.x) / (d || 1), ny = (a.y - b.y) / (d || 1);
+    const aMass = Math.max(0.5, (a.radius * a.radius) / 200);
+    a.vx += (nx * SEISMIC.pushImpulse * 1.3) / aMass;
+    a.vy += (ny * SEISMIC.pushImpulse * 1.3) / aMass;
+    a.spin += (Math.random() - 0.5) * 2.2;
+    emitSeismicContact(a.x, a.y, nx, ny);
+  }
+
+  if (!b.hitPlayer && ship.respawnTimer <= 0) {
+    const d = swept(ship.x, ship.y);
+    if (d >= 0) {
+      b.hitPlayer = true;
+      const nx = (ship.x - b.x) / (d || 1), ny = (ship.y - b.y) / (d || 1);
+      damagePlayer(SEISMIC.enemyDamage * SEISMIC.playerDamageMul,
+                   nx * SEISMIC.pushImpulse, ny * SEISMIC.pushImpulse);
+      emitSeismicContact(ship.x, ship.y, nx, ny);
+    }
+  }
+}
+
+function updateBombs(dt) {
+  for (let i = bombs.length - 1; i >= 0; i--) {
+    const b = bombs[i];
+    if (b.flashTimer > 0) b.flashTimer -= dt;
+
+    if (b.phase === "drift") {
+      // Heavy coast: inertia with mild drag, slow tumble winding down.
+      b.vx *= Math.exp(-0.8 * dt);
+      b.vy *= Math.exp(-0.8 * dt);
+      b.x += b.vx * dt; b.y += b.vy * dt;
+      b.angle += b.spin * dt;
+      b.spin  *= Math.exp(-0.5 * dt);
+      if (Math.random() < 0.22) {               // minimal trail
+        particles.push({
+          x: b.x, y: b.y, vx: b.vx * 0.1, vy: b.vy * 0.1,
+          life: 0.2, maxLife: 0.2, hue: 205, size: 0.9,
+        });
+      }
+      b.timer -= dt;
+      if (b.timer <= 0) { b.phase = "charge"; b.timer = SEISMIC.chargeTime; }
+
+    } else if (b.phase === "charge") {
+      // Motion freezes hard as everything is crushed inward.
+      b.vx *= Math.exp(-7 * dt);
+      b.vy *= Math.exp(-7 * dt);
+      b.x += b.vx * dt; b.y += b.vy * dt;
+      b.angle += b.spin * dt;
+      b.spin  *= Math.exp(-5 * dt);
+      spawnImplosionParticles(b);
+      pullDebris(b, dt);
+      b.timer -= dt;
+      if (b.timer <= 0) { b.phase = "silence"; b.timer = SEISMIC.silenceTime; b.vx = b.vy = 0; }
+
+    } else if (b.phase === "silence") {
+      // Dead still. Tiny white-hot core (drawn). Then it lets go.
+      b.timer -= dt;
+      if (b.timer <= 0) {
+        b.phase = "detonate";
+        b.detTimer = 0; b.ringR = 0; b.prevRingR = 0;
+        playSeismicBoom();
+      }
+
+    } else if (b.phase === "detonate") {
+      b.detTimer += dt;
+      b.prevRingR = b.ringR;
+      // Ease-out so the leading edge erupts fast then eases — blade-like.
+      const p = Math.min(1, b.detTimer / SEISMIC.ringDuration);
+      b.ringR = SEISMIC.ringMaxR * Math.pow(p, 0.7);
+      applySeismicContacts(b);
+      if (b.detTimer >= SEISMIC.ringDuration) bombs.splice(i, 1);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Torpedoes — a slow, lightly-homing volley fired out the nose. Built to
+// strip shields: huge shield damage, minimal hull damage. Best used to
+// peel a cruiser's shield so the cannon or a seismic charge can finish it.
+// ---------------------------------------------------------------------------
+const torpedoes = [];
+const TORPEDO = {
+  volley: 4,                 // torpedoes per launch
+  spread: Math.PI / 18,      // fan width across the volley (tight)
+  speed: 300,                // slow cruise (px/s)
+  inherit: 0.3,              // fraction of ship velocity carried at launch
+  lifetime: 3.4,
+  shieldDamage: 22,          // high vs shields
+  hullDamage: 5,             // low vs hull
+  radius: 7,                 // hit radius
+};
+
+function launchTorpedoes(w) {
+  if (ship.respawnTimer > 0) return;
+  if (w.cooldown > 0 || w.reloading || w.ammo <= 0) return;
+
+  const cosH = Math.cos(ship.heading), sinH = Math.sin(ship.heading);
+  const muzzleX = ship.x + cosH * ship.spriteSize * 0.42;
+  const muzzleY = ship.y + sinH * ship.spriteSize * 0.42;
+  const N = TORPEDO.volley;
+  for (let i = 0; i < N; i++) {
+    const t = N > 1 ? (i / (N - 1) - 0.5) : 0;   // -0.5..0.5 across the fan
+    const ang = ship.heading + t * TORPEDO.spread;
+    torpedoes.push({
+      x: muzzleX, y: muzzleY,
+      vx: ship.vx * TORPEDO.inherit + Math.cos(ang) * TORPEDO.speed,
+      vy: ship.vy * TORPEDO.inherit + Math.sin(ang) * TORPEDO.speed,
+      life: TORPEDO.lifetime, maxLife: TORPEDO.lifetime,
+      trailTimer: 0,
+    });
+  }
+  emitMuzzleFlash(muzzleX, muzzleY, ship.heading);
+  w.ammo -= 1;
+  w.cooldown = 1 / w.fireRate;
+  if (w.ammo <= 0) startReload(w);
+}
+
+// Torpedo impact: heavy shield drain, light hull damage, small blue burst.
+function torpedoHit(e, t) {
+  const top = e.y - e.radius * 0.8;
+  e.outOfCombat = 0;
+  emitImpact(t.x, t.y, t.vx, t.vy);
+  for (let i = 0; i < 10; i++) {
+    const a = Math.random() * Math.PI * 2, sp = 60 + Math.random() * 180;
+    particles.push({
+      x: t.x, y: t.y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp,
+      life: 0.2 + Math.random() * 0.2, maxLife: 0.4,
+      hue: 195 + Math.random() * 25, size: 1.4 + Math.random() * 1.8,
+    });
+  }
+  if (e.shield > 0) {
+    const absorbed = Math.min(e.shield, TORPEDO.shieldDamage);
+    e.shield -= absorbed;
+    e.shieldHitFlash = 0.25;
+    if (e.shield <= 0) { e.shield = 0; e.shieldBreakFlash = 0.5; }
+    spawnDamageNumber(e.x, top, absorbed, "shield");
+  } else {
+    e.health -= TORPEDO.hullDamage;
+    spawnDamageNumber(e.x, top, TORPEDO.hullDamage, "hull");
+  }
+  e.hitFlash = 0.12;
+}
+
+function updateTorpedoes(dt) {
+  for (let i = torpedoes.length - 1; i >= 0; i--) {
+    const t = torpedoes[i];
+    t.life -= dt;
+    if (t.life <= 0) { torpedoes.splice(i, 1); continue; }
+
+    // Dumb-fire: torpedoes hold the heading they launched on and travel in
+    // a straight line — no homing.
+    t.x += t.vx * dt;
+    t.y += t.vy * dt;
+
+    // Engine trail.
+    t.trailTimer -= dt;
+    if (t.trailTimer <= 0) {
+      t.trailTimer = 0.035;
+      const back = Math.atan2(-t.vy, -t.vx);
+      const sp = 30 + Math.random() * 40;
+      particles.push({
+        x: t.x, y: t.y,
+        vx: Math.cos(back) * sp + (Math.random() - 0.5) * 20,
+        vy: Math.sin(back) * sp + (Math.random() - 0.5) * 20,
+        life: 0.25 + Math.random() * 0.2, maxLife: 0.45,
+        hue: 190, size: 1.2 + Math.random() * 1.2,
+      });
+    }
+
+    // Enemy hit.
+    let consumed = false;
+    for (const e of enemies) {
+      const dx = t.x - e.x, dy = t.y - e.y;
+      const rr = e.radius + TORPEDO.radius;
+      if (dx * dx + dy * dy < rr * rr) {
+        torpedoHit(e, t);
+        consumed = true;
+        break;
+      }
+    }
+    if (consumed) { torpedoes.splice(i, 1); continue; }
+
+    // Asteroids stop torpedoes too.
+    for (const a of asteroids) {
+      const dx = t.x - a.x, dy = t.y - a.y;
+      const rr = a.radius * 0.9 + TORPEDO.radius;
+      if (dx * dx + dy * dy < rr * rr) {
+        emitImpact(t.x, t.y, t.vx, t.vy);
+        torpedoes.splice(i, 1);
+        consumed = true;
+        break;
+      }
+    }
+  }
+}
+
+function drawTorpedoes() {
+  for (const t of torpedoes) {
+    const sp = worldToScreen(t.x, t.y);
+    const ang = Math.atan2(t.vy, t.vx);
+    // Body — a small teal capsule pointing along travel.
+    ctx.save();
+    ctx.translate(sp.x, sp.y);
+    ctx.rotate(ang);
+    roundRectPath(ctx, -9, -3.2, 18, 6.4, 3);
+    ctx.fillStyle = "#2f5466";
+    ctx.fill();
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = "rgba(150,225,255,0.85)";
+    ctx.stroke();
+    // Warhead tip.
+    ctx.fillStyle = "rgba(190,240,255,0.95)";
+    ctx.beginPath(); ctx.arc(8, 0, 1.8, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+    // Soft glow.
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    const g = ctx.createRadialGradient(sp.x, sp.y, 0, sp.x, sp.y, 11);
+    g.addColorStop(0, "rgba(120,210,255,0.55)");
+    g.addColorStop(1, "rgba(80,160,255,0)");
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(sp.x, sp.y, 11, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Swarm missiles — the auto weapon's payload. Small, fast, hard-tracking
+// rounds fired in little volleys while the system is armed. Individually
+// they do trivial damage; their value is sustained chip pressure that finds
+// the target for you.
+// ---------------------------------------------------------------------------
+const missiles = [];
+const MISSILE = {
+  volley: 3,                 // missiles per auto-fire
+  speed: 260,
+  turnRate: 6.0,             // rad/s — tight homing
+  lifetime: 3.4,
+  damage: 1,                 // minimal
+  radius: 6,
+  launchRange: 650,          // only auto-fires at enemies within this
+  spread: Math.PI / 3,       // wide initial scatter; they curl back onto target
+};
+
+// Nearest enemy to (x,y) within maxDist, or null.
+function nearestEnemy(x, y, maxDist) {
+  let best = null, bestD2 = maxDist * maxDist;
+  for (const e of enemies) {
+    const dx = e.x - x, dy = e.y - y;
+    const d2 = dx * dx + dy * dy;
+    if (d2 < bestD2) { bestD2 = d2; best = e; }
+  }
+  return best;
+}
+
+function launchMissileVolley() {
+  const cosH = Math.cos(ship.heading), sinH = Math.sin(ship.heading);
+  // Fire from the ship's sides/front so the swarm reads as launching off
+  // the hull rather than the gun muzzle.
+  const ox = ship.x + cosH * ship.spriteSize * 0.18;
+  const oy = ship.y + sinH * ship.spriteSize * 0.18;
+  const target = nearestEnemy(ship.x, ship.y, MISSILE.launchRange);
+  const N = MISSILE.volley;
+  for (let i = 0; i < N; i++) {
+    // Scatter launch direction around the heading so they peel out then
+    // curve back in — the classic swarm look.
+    const t = N > 1 ? (i / (N - 1) - 0.5) : 0;
+    const ang = ship.heading + t * MISSILE.spread;
+    missiles.push({
+      x: ox, y: oy,
+      vx: ship.vx * 0.2 + Math.cos(ang) * MISSILE.speed,
+      vy: ship.vy * 0.2 + Math.sin(ang) * MISSILE.speed,
+      life: MISSILE.lifetime, maxLife: MISSILE.lifetime,
+      target,
+      trailTimer: 0,
+    });
+  }
+}
+
+function updateMissiles(dt) {
+  for (let i = missiles.length - 1; i >= 0; i--) {
+    const m = missiles[i];
+    m.life -= dt;
+    if (m.life <= 0) { missiles.splice(i, 1); continue; }
+
+    // Keep a live target; re-acquire if the current one died.
+    if (!m.target || m.target.health <= 0 || !enemies.includes(m.target)) {
+      m.target = nearestEnemy(m.x, m.y, MISSILE.launchRange);
+    }
+    if (m.target) {
+      const speed = Math.hypot(m.vx, m.vy) || 1;
+      const cur = Math.atan2(m.vy, m.vx);
+      let diff = Math.atan2(m.target.y - m.y, m.target.x - m.x) - cur;
+      while (diff >  Math.PI) diff -= Math.PI * 2;
+      while (diff < -Math.PI) diff += Math.PI * 2;
+      const turn = Math.max(-MISSILE.turnRate * dt, Math.min(MISSILE.turnRate * dt, diff));
+      const na = cur + turn;
+      m.vx = Math.cos(na) * speed;
+      m.vy = Math.sin(na) * speed;
+    }
+
+    m.x += m.vx * dt;
+    m.y += m.vy * dt;
+
+    // Thin smoky trail.
+    m.trailTimer -= dt;
+    if (m.trailTimer <= 0) {
+      m.trailTimer = 0.025;
+      particles.push({
+        x: m.x, y: m.y, vx: m.vx * -0.05, vy: m.vy * -0.05,
+        life: 0.2 + Math.random() * 0.15, maxLife: 0.35,
+        hue: 45, size: 1 + Math.random(),
+      });
+    }
+
+    // Enemy hit — low damage, routed through shields like everything else.
+    let consumed = false;
+    for (const e of enemies) {
+      const dx = m.x - e.x, dy = m.y - e.y;
+      const rr = e.radius + MISSILE.radius;
+      if (dx * dx + dy * dy < rr * rr) {
+        emitImpact(m.x, m.y, m.vx, m.vy);
+        damageEnemy(e, MISSILE.damage);
+        e.hitFlash = Math.max(e.hitFlash, 0.08);
+        consumed = true;
+        break;
+      }
+    }
+    if (consumed) { missiles.splice(i, 1); continue; }
+
+    // Asteroids stop them too.
+    for (const a of asteroids) {
+      const dx = m.x - a.x, dy = m.y - a.y;
+      const rr = a.radius * 0.9 + MISSILE.radius;
+      if (dx * dx + dy * dy < rr * rr) {
+        emitImpact(m.x, m.y, m.vx, m.vy);
+        missiles.splice(i, 1);
+        consumed = true;
+        break;
+      }
+    }
+  }
+}
+
+function drawMissiles() {
+  ctx.save();
+  for (const m of missiles) {
+    const sp = worldToScreen(m.x, m.y);
+    const ang = Math.atan2(m.vy, m.vx);
+    // Small dart.
+    ctx.save();
+    ctx.translate(sp.x, sp.y);
+    ctx.rotate(ang);
+    ctx.fillStyle = "rgba(255,235,180,0.95)";
+    ctx.beginPath();
+    ctx.moveTo(6, 0);
+    ctx.lineTo(-4, 2.4);
+    ctx.lineTo(-4, -2.4);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+    // Warm glow.
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    const g = ctx.createRadialGradient(sp.x, sp.y, 0, sp.x, sp.y, 7);
+    g.addColorStop(0, "rgba(255,210,120,0.6)");
+    g.addColorStop(1, "rgba(255,160,40,0)");
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(sp.x, sp.y, 7, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+  }
+  ctx.restore();
+}
+
+// Render bombs: the heavy tumbling body through the implosion/silence, then
+// the flat razor-thin shockwave during detonation.
+function drawBombs() {
+  for (const b of bombs) {
+    const sp = worldToScreen(b.x, b.y);
+
+    if (b.phase === "detonate") {
+      const p = Math.min(1, b.detTimer / SEISMIC.ringDuration); // 0 → 1
+      const r = b.ringR;
+      const fade = Math.max(0, 1 - p);          // ring brightness fades as it grows
+      const T = SEISMIC.ringThickness;
+      ctx.save();
+      ctx.globalCompositeOperation = "lighter";
+
+      // Detonation core flash — tiny, white-hot, only at the very start.
+      if (p < 0.14) {
+        const k = 1 - p / 0.14;
+        const g = ctx.createRadialGradient(sp.x, sp.y, 0, sp.x, sp.y, 44);
+        g.addColorStop(0, `rgba(255,255,255,${0.95 * k})`);
+        g.addColorStop(1, "rgba(200,230,255,0)");
+        ctx.fillStyle = g;
+        ctx.beginPath(); ctx.arc(sp.x, sp.y, 44, 0, Math.PI * 2); ctx.fill();
+      }
+
+      // Inner compression band — a darker-blue lip just behind the edge,
+      // suggesting light bent inward along the wavefront (fake lensing).
+      ctx.strokeStyle = `rgba(70,130,210,${0.22 * fade})`;
+      ctx.lineWidth = T * 1.5;
+      ctx.beginPath();
+      ctx.arc(sp.x, sp.y, Math.max(0, r - T * 0.85), 0, Math.PI * 2);
+      ctx.stroke();
+
+      // The blade: a razor-thin bright leading edge.
+      ctx.strokeStyle = `rgba(236,248,255,${0.96 * fade})`;
+      ctx.lineWidth = Math.max(1, T * (0.22 + 0.18 * (1 - p)));
+      ctx.beginPath(); ctx.arc(sp.x, sp.y, r, 0, Math.PI * 2); ctx.stroke();
+
+      // Faint outer afterglow trailing the edge.
+      ctx.strokeStyle = `rgba(150,210,255,${0.3 * fade})`;
+      ctx.lineWidth = 1.3;
+      ctx.beginPath(); ctx.arc(sp.x, sp.y, r + T * 0.6, 0, Math.PI * 2); ctx.stroke();
+
+      ctx.restore();
+      continue;
+    }
+
+    // --- Pre-detonation: the physical charge body ---
+    ctx.save();
+    ctx.translate(sp.x, sp.y);
+    ctx.rotate(b.angle);
+    ctx.fillStyle = "#22303d";
+    ctx.beginPath(); ctx.arc(0, 0, 7, 0, Math.PI * 2); ctx.fill();
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = "#7fb3d0";
+    ctx.stroke();
+    // A couple of casing marks so the tumble reads.
+    ctx.strokeStyle = "rgba(160,215,255,0.7)";
+    ctx.beginPath(); ctx.moveTo(-7, 0); ctx.lineTo(7, 0);
+    ctx.moveTo(0, -7); ctx.lineTo(0, 7); ctx.stroke();
+    ctx.restore();
+
+    // Mechanical release flash.
+    if (b.flashTimer > 0) {
+      const k = b.flashTimer / 0.12;
+      ctx.save();
+      ctx.globalCompositeOperation = "lighter";
+      ctx.fillStyle = `rgba(220,240,255,${0.8 * k})`;
+      ctx.beginPath(); ctx.arc(sp.x, sp.y, 10 * k + 3, 0, Math.PI * 2); ctx.fill();
+      ctx.restore();
+    }
+
+    // Core glow: ramps up as the implosion tightens, peaks white-hot and
+    // pinpoint during the silence beat.
+    let coreK = 0, coreR = 0;
+    if (b.phase === "charge") {
+      coreK = 1 - b.timer / SEISMIC.chargeTime; // 0 → 1 as it compresses
+      coreR = 13 * (1 - coreK) + 3;             // contracts inward
+    } else if (b.phase === "silence") {
+      coreK = 1; coreR = 2.5;                   // tiny, frozen, white-hot
+    }
+    if (coreK > 0) {
+      ctx.save();
+      ctx.globalCompositeOperation = "lighter";
+      const g = ctx.createRadialGradient(sp.x, sp.y, 0, sp.x, sp.y, coreR * 3);
+      g.addColorStop(0, `rgba(245,251,255,${0.55 + 0.45 * coreK})`);
+      g.addColorStop(0.5, `rgba(150,215,255,${0.45 * coreK})`);
+      g.addColorStop(1, "rgba(120,185,255,0)");
+      ctx.fillStyle = g;
+      ctx.beginPath(); ctx.arc(sp.x, sp.y, coreR * 3, 0, Math.PI * 2); ctx.fill();
+
+      // Contracting compression ring during the implosion.
+      if (b.phase === "charge") {
+        const rr = 64 * (1 - coreK) + 9;
+        ctx.strokeStyle = `rgba(175,222,255,${0.42 * coreK})`;
+        ctx.lineWidth = 1.3;
+        ctx.beginPath(); ctx.arc(sp.x, sp.y, rr, 0, Math.PI * 2); ctx.stroke();
+      }
+      ctx.restore();
+    }
+  }
+}
 
 // Aim angle: the mouse direction (world space) clamped to ±halfCone of
 // the ship's heading. Returns the unclamped diff too so the reticle can
 // color itself when the cursor has pushed past the cone edge.
 function computeAim() {
+  // Default: fire straight down the hull's nose. Manual aim only engages
+  // while the right mouse button is held.
+  if (!mouse.right) {
+    return { angle: ship.heading, diff: 0, clamped: false };
+  }
   const mouseWorldX = mouse.x - viewW / 2 + camera.x;
   const mouseWorldY = mouse.y - viewH / 2 + camera.y;
   const mdx = mouseWorldX - ship.x;
@@ -575,6 +1734,33 @@ function applyShipPhysics(s, controls, dt) {
 }
 
 function updateShip(dt) {
+  // Tick down damage/i-frame timers regardless of life state.
+  if (ship.hitFlash > 0)        ship.hitFlash -= dt;
+  if (ship.invuln > 0)          ship.invuln -= dt;
+  if (ship.shieldHitFlash > 0)  ship.shieldHitFlash -= dt;
+  if (ship.shieldBreakFlash > 0) ship.shieldBreakFlash -= dt;
+
+  // Shield regen: only ticks up once we've gone shieldRegenDelay seconds
+  // without taking damage (out of combat), and never while dead.
+  if (ship.respawnTimer <= 0) {
+    ship.outOfCombat += dt;
+    if (ship.outOfCombat >= ship.shieldRegenDelay && ship.shield < ship.maxShield) {
+      ship.shield = Math.min(ship.maxShield, ship.shield + ship.shieldRegenRate * dt);
+    }
+  }
+
+  // Dead: coast through the respawn delay, ignoring input, then revive.
+  if (ship.respawnTimer > 0) {
+    ship.respawnTimer -= dt;
+    const drag = Math.exp(-ship.linearDrag * dt);
+    ship.vx *= drag;
+    ship.vy *= drag;
+    ship.x += ship.vx * dt;
+    ship.y += ship.vy * dt;
+    if (ship.respawnTimer <= 0) respawnPlayer();
+    return;
+  }
+
   const controls = {
     thrust:    !!(keys["KeyW"] || keys["ArrowUp"]),
     brake:     !!(keys["KeyS"] || keys["ArrowDown"]),
@@ -675,25 +1861,47 @@ function decideEnemyControls(e) {
   // discrete headings when the player is roughly straight ahead.
   const turnLeft  = diff < -SNAP_STEP * 0.5;
   const turnRight = diff >  SNAP_STEP * 0.5;
-  const facing = Math.abs(diff) < enemyConfig.ai.facingTolerance;
-  const thrust = facing && dist > enemyConfig.ai.minThrustDist;
+  const facing = Math.abs(diff) < e.ai.facingTolerance;
+  const thrust = facing && dist > e.ai.minThrustDist;
 
   // Closing speed = dot(velocity, unit_to_player). Positive = approaching.
   const closingSpeed = (e.vx * dx + e.vy * dy) / dist;
-  const brake = dist < enemyConfig.ai.brakeDist
-             && closingSpeed > enemyConfig.ai.brakeClosingSpeed;
+  const brake = dist < e.ai.brakeDist
+             && closingSpeed > e.ai.brakeClosingSpeed;
 
   return { thrust, brake, turnLeft, turnRight, drift: false, boost: false };
 }
 
+// Spawn the mission's opening forces: all the cruisers plus a starting
+// handful of fighters. Cruisers are never replaced; fighters reinforce in
+// updateEnemies until the last cruiser dies.
+function spawnInitialEnemies() {
+  for (let n = 0; n < MISSION.totalCruisers; n++) spawnEnemy("cruiser");
+  for (let n = 0; n < MISSION.fighterCap; n++) spawnEnemy("fighter");
+}
+spawnInitialEnemies();
+
 function updateEnemies(dt) {
-  while (enemies.length < enemyConfig.count) spawnEnemy();
+  // Reinforcements: while any cruiser still lives, fighters are topped back
+  // up to the fixed cap every replenishInterval seconds — never a continuous
+  // swarm, so the player gets breathing room between waves.
+  if (mission.state === "active" && mission.cruisersDestroyed < MISSION.totalCruisers) {
+    mission.replenishTimer -= dt;
+    if (mission.replenishTimer <= 0) {
+      mission.replenishTimer = MISSION.replenishInterval;
+      let fighters = 0;
+      for (const e of enemies) if (e.typeKey === "fighter") fighters++;
+      while (fighters < MISSION.fighterCap) { spawnEnemy("fighter"); fighters++; }
+    }
+  }
 
   for (let i = enemies.length - 1; i >= 0; i--) {
     const e = enemies[i];
 
     if (e.health <= 0) {
       explodeEnemy(e);
+      if (e.typeKey === "cruiser") mission.cruisersDestroyed++;
+      else                          mission.fightersDestroyed++;
       enemies.splice(i, 1);
       continue;
     }
@@ -701,9 +1909,50 @@ function updateEnemies(dt) {
     if (e.hitFlash > 0) e.hitFlash -= dt;
     if (e.stun > 0) e.stun -= dt;
 
+    // Shield flares + out-of-combat regen (same rules as the player).
+    if (e.shieldHitFlash > 0)   e.shieldHitFlash -= dt;
+    if (e.shieldBreakFlash > 0) e.shieldBreakFlash -= dt;
+    if (e.maxShield > 0) {
+      e.outOfCombat += dt;
+      if (e.outOfCombat >= e.shieldRegenDelay && e.shield < e.maxShield) {
+        e.shield = Math.min(e.maxShield, e.shield + e.shieldRegenRate * dt);
+      }
+    }
+
     const controls = decideEnemyControls(e);
     e.thrusting = controls.thrust;  // exposed so drawEnemies can fire the engine glow
     applyShipPhysics(e, controls, dt);
+
+    // Gun. A stunned enemy holds fire (its knockback recovery doubles as
+    // a brief disarm). Otherwise it shoots when the player is in range,
+    // its nose is on target, and the player is actually alive.
+    e.fireCooldown -= dt;
+    if (e.stun <= 0 && ship.respawnTimer <= 0) {
+      const fdx = ship.x - e.x;
+      const fdy = ship.y - e.y;
+      const fdist = Math.hypot(fdx, fdy) || 1;
+      let aimDiff = Math.atan2(fdy, fdx) - e.heading;
+      while (aimDiff >  Math.PI) aimDiff -= Math.PI * 2;
+      while (aimDiff < -Math.PI) aimDiff += Math.PI * 2;
+      const inRange = fdist < e.fire.range;
+      const onTarget = Math.abs(aimDiff) < e.fire.aimTolerance;
+      if (e.fireCooldown <= 0 && inRange && onTarget) {
+        fireEnemyWeapon(e);
+        e.fireCooldown = 1 / e.fire.fireRate;
+      }
+    }
+
+    // Torpedo launcher (cruisers). Fires a slow dumb-fire volley at the
+    // player on its own cadence — no precise aim gate, since the volley
+    // leads with a spread and the player can dodge the slow rounds.
+    if (e.torpedo && e.stun <= 0 && ship.respawnTimer <= 0) {
+      e.torpedoCooldown -= dt;
+      const tdx = ship.x - e.x, tdy = ship.y - e.y;
+      if (e.torpedoCooldown <= 0 && (tdx * tdx + tdy * tdy) < e.torpedo.range * e.torpedo.range) {
+        fireEnemyTorpedoes(e);
+        e.torpedoCooldown = e.torpedo.interval;
+      }
+    }
 
     // Collide with the player ship — elastic-ish bounce that uses the
     // enemy's actual mass (rather than the old 0.6 magic number) so the
@@ -731,17 +1980,81 @@ function updateEnemies(dt) {
         ship.vy += j * ny / ship.mass;
         e.vx -= j * nx / eMass;
         e.vy -= j * ny / eMass;
+        // Ramming damage scales with how hard the two ships met, so a
+        // gentle bump barely stings while a high-speed collision hurts.
+        damagePlayer(Math.min(25, 6 + Math.abs(velN) * 0.06));
       }
-      e.health -= 1;
+      // Ramming deals no damage to the enemy — the player takes the brunt
+      // of a collision. It still shoves and briefly stuns them.
       e.hitFlash = 0.15;
       e.stun = 0.35;
+    }
+  }
+
+  separateCruisers(dt);
+
+  // Mission complete once the last cruiser is gone.
+  if (mission.state === "active" && mission.cruisersDestroyed >= MISSION.totalCruisers) {
+    mission.state = "won";
+  }
+}
+
+// Keep the heavy cruisers spaced out: a soft mutual repulsion that ramps up
+// as two cruisers close inside the desired gap, so they spread to flank the
+// player instead of stacking on the same spot.
+function separateCruisers(dt) {
+  const DESIRED = 380;   // preferred center-to-center spacing (px)
+  const STRENGTH = 260;  // repulsion acceleration at full overlap
+  for (let i = 0; i < enemies.length; i++) {
+    const a = enemies[i];
+    if (a.typeKey !== "cruiser") continue;
+    for (let j = i + 1; j < enemies.length; j++) {
+      const b = enemies[j];
+      if (b.typeKey !== "cruiser") continue;
+      const dx = a.x - b.x, dy = a.y - b.y;
+      const d = Math.hypot(dx, dy);
+      if (d > 1 && d < DESIRED) {
+        const f = (1 - d / DESIRED) * STRENGTH * dt;
+        const nx = dx / d, ny = dy / d;
+        a.vx += nx * f; a.vy += ny * f;
+        b.vx -= nx * f; b.vy -= ny * f;
+      }
     }
   }
 }
 
 function updateWeapons(dt) {
-  weapon.cooldown -= dt;
-  if (!mouse.down || weapon.cooldown > 0) return;
+  // Tick every weapon's timers, not just the active one, so a weapon
+  // keeps reloading in the background after you switch off it.
+  for (const w of weapons) {
+    if (w.cooldown > 0) w.cooldown -= dt;
+    if (w.reloading) {
+      w.reloadTimer -= dt;
+      if (w.reloadTimer <= 0) {
+        w.reloading = false;
+        w.reloadTimer = 0;
+        w.ammo = w.maxAmmo;
+      }
+    }
+
+    // Auto weapons fire on their own while armed — as long as the player is
+    // alive, there's a target in range, and they have ammo/cooldown ready.
+    if (w.type === "auto" && w.active && !w.reloading && w.cooldown <= 0 &&
+        w.ammo > 0 && ship.respawnTimer <= 0) {
+      if (nearestEnemy(ship.x, ship.y, MISSILE.launchRange)) {
+        launchMissileVolley();
+        w.cooldown = 1 / w.fireRate;
+        w.ammo -= 1;
+        if (w.ammo <= 0) startReload(w);
+      }
+    }
+  }
+
+  const w = weapon;
+  // Only gun-type weapons fire on the trigger; bombs deploy via hotkey.
+  if (w.type !== "gun") return;
+  // Can't fire while not triggering, mid-cooldown, reloading, or empty.
+  if (!mouse.down || w.cooldown > 0 || w.reloading || w.ammo <= 0) return;
 
   // Muzzle stays on the nose along the ship's heading — only the bullet
   // direction follows the (clamped) aim, so the cannon visually fires
@@ -749,8 +2062,8 @@ function updateWeapons(dt) {
   // cursor is.
   const cosH = Math.cos(ship.heading);
   const sinH = Math.sin(ship.heading);
-  const muzzleX = ship.x + cosH * ship.spriteSize * weapon.muzzleForward;
-  const muzzleY = ship.y + sinH * ship.spriteSize * weapon.muzzleForward;
+  const muzzleX = ship.x + cosH * ship.spriteSize * w.muzzleForward;
+  const muzzleY = ship.y + sinH * ship.spriteSize * w.muzzleForward;
 
   const aim = computeAim().angle;
   const cosA = Math.cos(aim);
@@ -760,14 +2073,17 @@ function updateWeapons(dt) {
     x: muzzleX,
     y: muzzleY,
     // Projectiles inherit ship momentum (Newtonian).
-    vx: ship.vx + cosA * weapon.projectileSpeed,
-    vy: ship.vy + sinA * weapon.projectileSpeed,
-    life: weapon.projectileLifetime,
-    maxLife: weapon.projectileLifetime,
+    vx: ship.vx + cosA * w.projectileSpeed,
+    vy: ship.vy + sinA * w.projectileSpeed,
+    life: w.projectileLifetime,
+    maxLife: w.projectileLifetime,
   });
 
   emitMuzzleFlash(muzzleX, muzzleY, aim);
-  weapon.cooldown = 1 / weapon.fireRate;
+  w.cooldown = 1 / w.fireRate;
+  w.ammo -= 1;
+  // Spent magazine → kick off the auto-reload.
+  if (w.ammo <= 0) startReload(w);
 }
 
 function updateProjectiles(dt) {
@@ -790,10 +2106,7 @@ function updateProjectiles(dt) {
       const rr = e.radius;
       if (ddx * ddx + ddy * ddy < rr * rr) {
         emitImpact(p.x, p.y, p.vx, p.vy);
-        const sp = Math.hypot(p.vx, p.vy) || 1;
-        e.vx += (p.vx / sp) * 40;
-        e.vy += (p.vy / sp) * 40;
-        e.health -= 1;
+        damageEnemy(e, 1);
         e.hitFlash = 0.12;
         e.stun = Math.max(e.stun, 0.18);
         consumed = true;
@@ -819,6 +2132,211 @@ function updateProjectiles(dt) {
         break;
       }
     }
+  }
+}
+
+// Spawn a hostile projectile from an enemy, aimed at the player with a
+// little random spread. The bolt inherits the enemy's momentum, mirroring
+// how the player's shots inherit theirs.
+function fireEnemyWeapon(e) {
+  const f = e.fire;
+  const cosH = Math.cos(e.heading);
+  const sinH = Math.sin(e.heading);
+  const muzzleX = e.x + cosH * e.spriteSize * f.muzzleForward;
+  const muzzleY = e.y + sinH * e.spriteSize * f.muzzleForward;
+
+  // Aim straight at the player (not just along the hull) so a slightly
+  // off-axis enemy can still land hits, then jitter by ±spread.
+  const aim = Math.atan2(ship.y - muzzleY, ship.x - muzzleX)
+            + (Math.random() - 0.5) * 2 * f.spread;
+
+  enemyProjectiles.push({
+    x: muzzleX,
+    y: muzzleY,
+    vx: e.vx + Math.cos(aim) * f.projectileSpeed,
+    vy: e.vy + Math.sin(aim) * f.projectileSpeed,
+    life: f.projectileLifetime,
+    maxLife: f.projectileLifetime,
+    damage: f.damage,            // each bolt carries its shooter's damage
+  });
+  emitMuzzleFlash(muzzleX, muzzleY, aim);
+}
+
+function updateEnemyProjectiles(dt) {
+  for (let i = enemyProjectiles.length - 1; i >= 0; i--) {
+    const p = enemyProjectiles[i];
+    p.life -= dt;
+    if (p.life <= 0) { enemyProjectiles.splice(i, 1); continue; }
+    p.x += p.vx * dt;
+    p.y += p.vy * dt;
+
+    if (ship.respawnTimer <= 0) {
+      const sdx = p.x - ship.x;
+      const sdy = p.y - ship.y;
+      const d2 = sdx * sdx + sdy * sdy;
+
+      // Active shield: any bolt touching the bubble is intercepted and
+      // destroyed at the surface, draining the shield instead of the hull.
+      // Works even during respawn i-frames so the barrier reads as solid.
+      const shieldR = ship.radius * SHIELD_RADIUS_MULT;
+      if (ship.shield > 0 && d2 < shieldR * shieldR) {
+        const d = Math.sqrt(d2) || 1;
+        const nx = sdx / d, ny = sdy / d;
+        // Flare sits just off the hull surface (no bubble to sit on now),
+        // so the deflection reads as energy flashing on the ship's skin.
+        const fr = ship.radius * 1.15;
+        emitShieldImpact(ship.x + nx * fr, ship.y + ny * fr, nx, ny);
+        ship.outOfCombat = 0;
+        ship.shield = Math.max(0, ship.shield - p.damage);
+        ship.shieldHitFlash = 0.25;
+        if (ship.shield <= 0) ship.shieldBreakFlash = 0.5;
+        enemyProjectiles.splice(i, 1);
+        continue;
+      }
+
+      // Shield down — the bolt reaches the bare hull (skipped during the
+      // post-respawn i-frames so you can't be insta-killed on revival).
+      if (ship.invuln <= 0 && d2 < ship.radius * ship.radius) {
+        emitImpact(p.x, p.y, p.vx, p.vy);
+        const sp = Math.hypot(p.vx, p.vy) || 1;
+        damagePlayer(p.damage, (p.vx / sp) * 35, (p.vy / sp) * 35);
+        enemyProjectiles.splice(i, 1);
+        continue;
+      }
+    }
+
+    // Asteroids block enemy fire too, so you can use cover.
+    let blocked = false;
+    for (let j = 0; j < asteroids.length; j++) {
+      const a = asteroids[j];
+      const ddx = p.x - a.x;
+      const ddy = p.y - a.y;
+      const rr = a.radius * 0.9;
+      if (ddx * ddx + ddy * ddy < rr * rr) {
+        emitImpact(p.x, p.y, p.vx, p.vy);
+        blocked = true;
+        break;
+      }
+    }
+    if (blocked) { enemyProjectiles.splice(i, 1); continue; }
+  }
+}
+
+// Cruiser fires a slow volley of torpedoes straight at the player.
+function fireEnemyTorpedoes(e) {
+  const cfg = e.torpedo;
+  const cosH = Math.cos(e.heading), sinH = Math.sin(e.heading);
+  const ox = e.x + cosH * e.spriteSize * 0.3;
+  const oy = e.y + sinH * e.spriteSize * 0.3;
+  const baseAim = Math.atan2(ship.y - oy, ship.x - ox);
+  const N = cfg.volley;
+  for (let i = 0; i < N; i++) {
+    const t = N > 1 ? (i / (N - 1) - 0.5) : 0;
+    const ang = baseAim + t * cfg.spread;
+    enemyTorpedoes.push({
+      x: ox, y: oy,
+      vx: e.vx * 0.2 + Math.cos(ang) * cfg.speed,
+      vy: e.vy * 0.2 + Math.sin(ang) * cfg.speed,
+      life: cfg.lifetime, maxLife: cfg.lifetime,
+      shieldDamage: cfg.shieldDamage,
+      hullDamage: cfg.hullDamage,
+      trailTimer: 0,
+    });
+  }
+  emitMuzzleFlash(ox, oy, baseAim);
+}
+
+function updateEnemyTorpedoes(dt) {
+  for (let i = enemyTorpedoes.length - 1; i >= 0; i--) {
+    const t = enemyTorpedoes[i];
+    t.life -= dt;
+    if (t.life <= 0) { enemyTorpedoes.splice(i, 1); continue; }
+    t.x += t.vx * dt;
+    t.y += t.vy * dt;
+
+    // Hostile orange trail.
+    t.trailTimer -= dt;
+    if (t.trailTimer <= 0) {
+      t.trailTimer = 0.04;
+      particles.push({
+        x: t.x, y: t.y, vx: t.vx * -0.05, vy: t.vy * -0.05,
+        life: 0.25 + Math.random() * 0.2, maxLife: 0.45,
+        hue: 24, size: 1.2 + Math.random() * 1.2,
+      });
+    }
+
+    if (ship.respawnTimer <= 0) {
+      const sdx = t.x - ship.x, sdy = t.y - ship.y;
+      const d2 = sdx * sdx + sdy * sdy;
+
+      // The player's shield intercepts the torpedo at the bubble, eating a
+      // heavy shield hit — exactly the anti-shield punch the player's own
+      // torpedoes land on the cruiser.
+      const shieldR = ship.radius * SHIELD_RADIUS_MULT;
+      if (ship.shield > 0 && d2 < shieldR * shieldR) {
+        const d = Math.sqrt(d2) || 1;
+        const nx = sdx / d, ny = sdy / d;
+        emitShieldImpact(ship.x + nx * ship.radius * 1.15, ship.y + ny * ship.radius * 1.15, nx, ny);
+        ship.outOfCombat = 0;
+        const absorbed = Math.min(ship.shield, t.shieldDamage);
+        ship.shield = Math.max(0, ship.shield - t.shieldDamage);
+        ship.shieldHitFlash = 0.25;
+        if (ship.shield <= 0) ship.shieldBreakFlash = 0.5;
+        spawnDamageNumber(ship.x, ship.y - ship.radius * 0.8, absorbed, "shield");
+        enemyTorpedoes.splice(i, 1);
+        continue;
+      }
+
+      // Shield down — low hull damage with a shove.
+      if (ship.invuln <= 0 && d2 < ship.radius * ship.radius) {
+        emitImpact(t.x, t.y, t.vx, t.vy);
+        const sp = Math.hypot(t.vx, t.vy) || 1;
+        damagePlayer(t.hullDamage, (t.vx / sp) * 30, (t.vy / sp) * 30);
+        enemyTorpedoes.splice(i, 1);
+        continue;
+      }
+    }
+
+    // Asteroids block them too.
+    let blocked = false;
+    for (let j = 0; j < asteroids.length; j++) {
+      const a = asteroids[j];
+      const ddx = t.x - a.x, ddy = t.y - a.y;
+      const rr = a.radius * 0.9 + 7;
+      if (ddx * ddx + ddy * ddy < rr * rr) {
+        emitImpact(t.x, t.y, t.vx, t.vy);
+        blocked = true;
+        break;
+      }
+    }
+    if (blocked) { enemyTorpedoes.splice(i, 1); continue; }
+  }
+}
+
+function drawEnemyTorpedoes() {
+  for (const t of enemyTorpedoes) {
+    const sp = worldToScreen(t.x, t.y);
+    const ang = Math.atan2(t.vy, t.vx);
+    ctx.save();
+    ctx.translate(sp.x, sp.y);
+    ctx.rotate(ang);
+    roundRectPath(ctx, -9, -3.2, 18, 6.4, 3);
+    ctx.fillStyle = "#5a2f2f";
+    ctx.fill();
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = "rgba(255,150,120,0.9)";
+    ctx.stroke();
+    ctx.fillStyle = "rgba(255,210,180,0.95)";
+    ctx.beginPath(); ctx.arc(8, 0, 1.8, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    const g = ctx.createRadialGradient(sp.x, sp.y, 0, sp.x, sp.y, 11);
+    g.addColorStop(0, "rgba(255,150,90,0.55)");
+    g.addColorStop(1, "rgba(255,90,40,0)");
+    ctx.fillStyle = g;
+    ctx.beginPath(); ctx.arc(sp.x, sp.y, 11, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
   }
 }
 
@@ -952,11 +2470,12 @@ function drawEnemies() {
     if (sp.x < -margin || sp.y < -margin ||
         sp.x > viewW + margin || sp.y > viewH + margin) continue;
 
-    if (enemySpriteReady) {
-      const frame = SHIP_SPRITE.frameForHeading(e.heading);
+    const frame = SHIP_SPRITE.frameForHeading(e.heading);
+    const ready = spriteLoaded(e.sprite);
+    if (ready) {
       const sx = (frame % SHIP_SPRITE.cols) * SHIP_SPRITE.frameSize;
       const sy = Math.floor(frame / SHIP_SPRITE.cols) * SHIP_SPRITE.frameSize;
-      ctx.drawImage(enemySprite,
+      ctx.drawImage(e.sprite,
         sx, sy, SHIP_SPRITE.frameSize, SHIP_SPRITE.frameSize,
         sp.x - size / 2, sp.y - size / 2, size, size);
     } else {
@@ -969,6 +2488,43 @@ function drawEnemies() {
       ctx.arc(0, 0, e.radius, 0, Math.PI * 2);
       ctx.fill();
       ctx.restore();
+    }
+
+    // Shield glow on the hull — the cruiser's regenerating shield, drawn
+    // the same way as the player's: a blue energy tint masked to the hull
+    // silhouette, brighter with more shield, flaring on hits and collapse.
+    if (e.maxShield > 0 && ready) {
+      const sfrac = Math.max(0, Math.min(1, e.shield / e.maxShield));
+      const hit = Math.max(0, e.shieldHitFlash / 0.25);
+      const brk = Math.max(0, e.shieldBreakFlash / 0.5);
+      const sheen = sfrac > 0 ? 0.26 + 0.4 * sfrac : 0;
+      const intensity = Math.min(1.1, sheen + 0.6 * hit + 0.85 * brk);
+      if (intensity > 0.01) {
+        const fs = SHIP_SPRITE.frameSize;
+        const fsx = (frame % SHIP_SPRITE.cols) * fs;
+        const fsy = Math.floor(frame / SHIP_SPRITE.cols) * fs;
+        const octx = shieldFxCtx;
+        octx.globalCompositeOperation = "source-over";
+        octx.clearRect(0, 0, fs, fs);
+        octx.drawImage(e.sprite, fsx, fsy, fs, fs, 0, 0, fs, fs);
+        octx.globalCompositeOperation = "source-atop";
+        const t = performance.now() * 0.001;
+        const band = (Math.sin(t * 3.0 + e.x * 0.02) * 0.5 + 0.5) * fs;
+        const grad = octx.createLinearGradient(0, band - fs * 0.55, 0, band + fs * 0.55);
+        const edge = brk > 0.01 ? "rgba(200,235,255," : "rgba(40,120,255,";
+        const peak = brk > 0.01 ? "rgba(245,252,255," : "rgba(150,225,255,";
+        grad.addColorStop(0.0, edge + (0.45 + 0.4 * hit) + ")");
+        grad.addColorStop(0.5, peak + (0.85 + 0.15 * hit) + ")");
+        grad.addColorStop(1.0, edge + (0.45 + 0.4 * hit) + ")");
+        octx.fillStyle = grad;
+        octx.fillRect(0, 0, fs, fs);
+        octx.globalCompositeOperation = "source-over";
+        ctx.save();
+        ctx.globalCompositeOperation = "lighter";
+        ctx.globalAlpha = intensity;
+        ctx.drawImage(shieldFx, sp.x - size / 2, sp.y - size / 2, size, size);
+        ctx.restore();
+      }
     }
 
     // Red engine glow — mirrors the player's white one. Drawn on top of
@@ -1005,7 +2561,37 @@ function drawEnemies() {
       ctx.fill();
       ctx.restore();
     }
+
+    // Shield + health bars for shielded heavy units (the cruiser). Sit just
+    // above the hull so you can read how close it is to breaking.
+    if (e.maxShield > 0) {
+      const bw = e.radius * 2.0;
+      const bh = 5;
+      const bx = sp.x - bw / 2;
+      let by = sp.y - e.radius - 26;
+      const sfrac = Math.max(0, Math.min(1, e.shield / e.maxShield));
+      const hfrac = Math.max(0, Math.min(1, e.health / e.maxHealth));
+      // Shield bar (cyan) on top.
+      drawEntityBar(bx, by, bw, bh, sfrac, "rgba(90,185,255,0.95)");
+      // Health bar (green→red) beneath it.
+      by += bh + 2;
+      const hue = Math.round(hfrac * 120);
+      drawEntityBar(bx, by, bw, bh, hfrac, `hsla(${hue},85%,52%,0.95)`);
+    }
   }
+}
+
+// Small framed progress bar in screen space — used for enemy shield/health.
+function drawEntityBar(x, y, w, h, frac, fillStyle) {
+  ctx.save();
+  ctx.fillStyle = "rgba(6,14,24,0.7)";
+  ctx.fillRect(x - 1, y - 1, w + 2, h + 2);
+  ctx.fillStyle = fillStyle;
+  ctx.fillRect(x, y, w * frac, h);
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = "rgba(140,180,210,0.55)";
+  ctx.strokeRect(x - 1, y - 1, w + 2, h + 2);
+  ctx.restore();
 }
 
 // Subtle dashed outline of the ±halfCone firing arc. Always visible so
@@ -1013,7 +2599,7 @@ function drawEnemies() {
 // having to rotate. Drawn from the muzzle position out to the same
 // distance as the reticle, with an arc closing the far end.
 function drawAimCone() {
-  if (!mouse.down) return;
+  if (!mouse.right || weapon.type !== "gun") return;
   const muzzleDist = ship.spriteSize * weapon.muzzleForward;
   const reachDist  = ship.spriteSize * weapon.reticleDistance;
   const cosH = Math.cos(ship.heading);
@@ -1048,7 +2634,7 @@ function drawAimCone() {
 // amber when the cursor has pushed past the cone edge, signaling that
 // the player needs to rotate the hull to keep tracking the target.
 function drawAimReticle() {
-  if (!mouse.down) return;
+  if (!mouse.right || weapon.type !== "gun") return;
   const mouseWorldX = mouse.x - viewW / 2 + camera.x;
   const mouseWorldY = mouse.y - viewH / 2 + camera.y;
   const mdx = mouseWorldX - ship.x;
@@ -1111,9 +2697,320 @@ function drawProjectiles() {
   ctx.restore();
 }
 
+// Hostile fire — same bolt shape as the player's cannon but tinted an
+// angry red so incoming shots are instantly distinguishable from yours.
+function drawEnemyProjectiles() {
+  ctx.save();
+  ctx.globalCompositeOperation = "lighter";
+  for (const p of enemyProjectiles) {
+    const sp = worldToScreen(p.x, p.y);
+    const k = Math.max(0, Math.min(1, p.life / p.maxLife));
+    const speed = Math.hypot(p.vx, p.vy) || 1;
+    const len = 14;
+    const dx = (p.vx / speed) * len;
+    const dy = (p.vy / speed) * len;
+    const grad = ctx.createLinearGradient(sp.x - dx, sp.y - dy, sp.x + dx * 0.4, sp.y + dy * 0.4);
+    grad.addColorStop(0,    "rgba(255,40,40,0)");
+    grad.addColorStop(0.55, `rgba(255,90,70,${0.55 * k})`);
+    grad.addColorStop(1,    `rgba(255,210,170,${0.95 * k})`);
+    ctx.strokeStyle = grad;
+    ctx.lineWidth = 2.4;
+    ctx.lineCap = "round";
+    ctx.beginPath();
+    ctx.moveTo(sp.x - dx, sp.y - dy);
+    ctx.lineTo(sp.x + dx * 0.4, sp.y + dy * 0.4);
+    ctx.stroke();
+    ctx.fillStyle = `rgba(255,220,200,${0.95 * k})`;
+    ctx.beginPath();
+    ctx.arc(sp.x, sp.y, 2.4, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+// Full-screen red vignette that pulses when the player takes a hit, and a
+// steadier wash while health is critically low — a peripheral damage cue
+// so you feel hits even with your eyes on the action.
+function drawDamageOverlay() {
+  let intensity = 0;
+  if (ship.hitFlash > 0) intensity = Math.max(intensity, ship.hitFlash / 0.18);
+  if (ship.respawnTimer <= 0) {
+    const hp = ship.health / ship.maxHealth;
+    if (hp < 0.3) intensity = Math.max(intensity, (0.3 - hp) / 0.3 * 0.5);
+  }
+  if (intensity <= 0) return;
+  ctx.save();
+  const g = ctx.createRadialGradient(
+    viewW / 2, viewH / 2, Math.min(viewW, viewH) * 0.35,
+    viewW / 2, viewH / 2, Math.max(viewW, viewH) * 0.75);
+  g.addColorStop(0, "rgba(255,0,0,0)");
+  g.addColorStop(1, `rgba(255,0,0,${0.55 * Math.min(1, intensity)})`);
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, viewW, viewH);
+  ctx.restore();
+}
+
+// Centered "ship destroyed" message and respawn countdown shown while
+// the player is dead.
+function drawRespawnNotice() {
+  if (ship.respawnTimer <= 0) return;
+  ctx.save();
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = "rgba(255,120,120,0.95)";
+  ctx.shadowColor = "rgba(255,40,40,0.8)";
+  ctx.shadowBlur = 12;
+  ctx.font = "600 34px ui-monospace, Consolas, monospace";
+  ctx.fillText("SHIP DESTROYED", viewW / 2, viewH / 2 - 18);
+  ctx.font = "16px ui-monospace, Consolas, monospace";
+  ctx.fillStyle = "rgba(200,230,255,0.85)";
+  ctx.shadowBlur = 6;
+  ctx.fillText("respawning in " + ship.respawnTimer.toFixed(1) + "s", viewW / 2, viewH / 2 + 20);
+  ctx.restore();
+}
+
+// Trace a rounded-rect path (older canvases lack ctx.roundRect).
+function roundRectPath(c, x, y, w, h, r) {
+  c.beginPath();
+  c.moveTo(x + r, y);
+  c.arcTo(x + w, y,     x + w, y + h, r);
+  c.arcTo(x + w, y + h, x,     y + h, r);
+  c.arcTo(x,     y + h, x,     y,     r);
+  c.arcTo(x,     y,     x + w, y,     r);
+  c.closePath();
+}
+
+// Weapon hotbar, centered along the bottom. One slot per weapon showing
+// its number key, name, and ammo. The active slot is highlighted; a
+// reloading slot shows a sweeping progress fill and a RELOAD label.
+function drawHotbar() {
+  const n = weapons.length;
+  const slot = 86, gap = 14, pad = 70;   // pad = distance lifted off the bottom
+  const corner = 12;
+  const totalW = n * slot + (n - 1) * gap;
+  const x0 = Math.round((viewW - totalW) / 2);
+  const y = viewH - slot - pad;
+
+  ctx.save();
+  ctx.textBaseline = "middle";
+  for (let i = 0; i < n; i++) {
+    const w = weapons[i];
+    const x = x0 + i * (slot + gap);
+    const active = i === activeWeaponIndex;
+
+    // Slot background + border.
+    roundRectPath(ctx, x, y, slot, slot, corner);
+    ctx.fillStyle = "rgba(8,16,28,0.74)";
+    ctx.fill();
+
+    // Reload sweep — a bottom-up fill clipped to the slot.
+    if (w.reloading) {
+      const k = 1 - w.reloadTimer / w.reloadTime; // 0 -> 1
+      ctx.save();
+      roundRectPath(ctx, x, y, slot, slot, corner);
+      ctx.clip();
+      ctx.fillStyle = "rgba(255,170,50,0.22)";
+      ctx.fillRect(x, y + slot * (1 - k), slot, slot * k);
+      ctx.restore();
+    }
+
+    const armed = w.type === "auto" && w.active;
+    roundRectPath(ctx, x, y, slot, slot, corner);
+    ctx.lineWidth = (active || armed) ? 2.5 : 1.5;
+    ctx.strokeStyle = armed ? "rgba(120,255,170,0.95)"
+                    : active ? "rgba(120,220,255,0.95)"
+                    : "rgba(80,130,170,0.55)";
+    ctx.stroke();
+
+    // Armed indicator for auto weapons: a small status lamp, top-right.
+    if (w.type === "auto") {
+      ctx.fillStyle = armed ? "rgba(120,255,170,0.95)" : "rgba(90,120,140,0.7)";
+      ctx.beginPath();
+      ctx.arc(x + slot - 10, y + 10, 3.5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.textAlign = "right";
+      ctx.font = "9px ui-monospace, Consolas, monospace";
+      ctx.fillStyle = armed ? "rgba(150,255,190,0.9)" : "rgba(110,140,160,0.7)";
+      ctx.fillText(armed ? "ON" : "OFF", x + slot - 16, y + 11);
+    }
+
+    // Number key, top-left (with secondary hotkey hint where one exists).
+    ctx.textAlign = "left";
+    ctx.font = "16px ui-monospace, Consolas, monospace";
+    ctx.fillStyle = active ? "rgba(170,225,255,0.95)" : "rgba(130,180,210,0.7)";
+    ctx.fillText(String(i + 1), x + 9, y + 16);
+    const secondary = HOTBAR_SECONDARY[i];
+    if (secondary) {
+      ctx.font = "11px ui-monospace, Consolas, monospace";
+      ctx.fillStyle = active ? "rgba(150,200,230,0.75)" : "rgba(110,150,180,0.6)";
+      ctx.fillText("/ " + secondary, x + 21, y + 15);
+    }
+
+    // Weapon name above the box.
+    ctx.textAlign = "center";
+    ctx.font = "13px ui-monospace, Consolas, monospace";
+    ctx.fillStyle = active ? "rgba(150,220,255,0.9)" : "rgba(110,160,190,0.55)";
+    ctx.fillText(w.name, x + slot / 2, y - 13);
+
+    if (w.reloading) {
+      ctx.font = "600 16px ui-monospace, Consolas, monospace";
+      ctx.fillStyle = "rgba(255,200,90,0.95)";
+      ctx.fillText("RELOAD", x + slot / 2, y + slot / 2 - 6);
+      ctx.font = "14px ui-monospace, Consolas, monospace";
+      ctx.fillStyle = "rgba(255,210,120,0.8)";
+      ctx.fillText(w.reloadTimer.toFixed(1) + "s", x + slot / 2, y + slot / 2 + 18);
+    } else {
+      // Ammo count, big; turns red when empty.
+      ctx.font = "600 32px ui-monospace, Consolas, monospace";
+      ctx.fillStyle = w.ammo > 0 ? "rgba(215,242,255,0.96)" : "rgba(255,120,120,0.95)";
+      ctx.fillText(String(w.ammo), x + slot / 2, y + slot / 2 - 2);
+      ctx.font = "13px ui-monospace, Consolas, monospace";
+      ctx.fillStyle = "rgba(120,170,200,0.7)";
+      ctx.fillText("/ " + w.maxAmmo, x + slot / 2, y + slot - 14);
+    }
+  }
+  ctx.restore();
+}
+
+// Offscreen buffer used to tint just the ship's silhouette. We draw the
+// current sprite frame into it, then use "source-atop" so subsequent
+// fills only land on the ship's opaque pixels — the canvas equivalent of
+// masking a fragment shader to the hull.
+const shieldFx = document.createElement("canvas");
+shieldFx.width = SHIP_SPRITE.frameSize;
+shieldFx.height = SHIP_SPRITE.frameSize;
+const shieldFxCtx = shieldFx.getContext("2d");
+
+// Shield "shader": instead of a bubble, the ship's own hull lights up in
+// energized blue. Intensity tracks the shield fraction, spikes when a
+// bolt is absorbed, and a vertical energy band sweeps across the hull so
+// it reads as a live force field skinned onto the sprite. A bright
+// whole-hull flash plays the instant the shield collapses.
+function drawShieldOverlay() {
+  if (ship.respawnTimer > 0) return;
+  const sfrac = Math.max(0, Math.min(1, ship.shield / ship.maxShield));
+  const hit = Math.max(0, ship.shieldHitFlash / 0.25);   // 1 just after a hit
+  const brk = Math.max(0, ship.shieldBreakFlash / 0.5);  // 1 just after collapse
+  if (sfrac <= 0 && hit <= 0 && brk <= 0) return;
+
+  // Overall strength of the effect. Steady sheen only while shield > 0;
+  // hit and collapse flashes can punch through regardless.
+  const sheen = sfrac > 0 ? 0.30 + 0.42 * sfrac : 0;
+  const intensity = Math.min(1.15, sheen + 0.7 * hit + 0.9 * brk);
+  if (intensity <= 0.01) return;
+
+  const sp = worldToScreen(ship.x, ship.y);
+  const size = ship.spriteSize;
+
+  if (shipSpriteReady) {
+    const frame = SHIP_SPRITE.frameForHeading(ship.heading);
+    const fs = SHIP_SPRITE.frameSize;
+    const fsx = (frame % SHIP_SPRITE.cols) * fs;
+    const fsy = Math.floor(frame / SHIP_SPRITE.cols) * fs;
+
+    const octx = shieldFxCtx;
+    octx.globalCompositeOperation = "source-over";
+    octx.clearRect(0, 0, fs, fs);
+    // 1) Stamp the hull shape as the mask.
+    octx.drawImage(shipSprite, fsx, fsy, fs, fs, 0, 0, fs, fs);
+    // 2) Tint only those pixels. A sweeping bright band gives the live
+    //    "energy crawling over the hull" look; collapse washes it white.
+    octx.globalCompositeOperation = "source-atop";
+    const t = performance.now() * 0.001;
+    const band = (Math.sin(t * 3.2) * 0.5 + 0.5) * fs;
+    const grad = octx.createLinearGradient(0, band - fs * 0.55, 0, band + fs * 0.55);
+    const edge = brk > 0.01 ? "rgba(200,235,255," : "rgba(40,120,255,";
+    const peak = brk > 0.01 ? "rgba(245,252,255," : "rgba(150,225,255,";
+    grad.addColorStop(0.0, edge + (0.45 + 0.4 * hit) + ")");
+    grad.addColorStop(0.5, peak + (0.85 + 0.15 * hit) + ")");
+    grad.addColorStop(1.0, edge + (0.45 + 0.4 * hit) + ")");
+    octx.fillStyle = grad;
+    octx.fillRect(0, 0, fs, fs);
+    octx.globalCompositeOperation = "source-over";
+
+    // 3) Composite the tinted hull additively over the real ship so it
+    //    glows rather than replacing it.
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    ctx.globalAlpha = intensity;
+    ctx.drawImage(shieldFx, sp.x - size / 2, sp.y - size / 2, size, size);
+    ctx.restore();
+  } else {
+    // Fallback before the sprite streams in: a tight blue glow blob.
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    const g = ctx.createRadialGradient(sp.x, sp.y, 0, sp.x, sp.y, ship.radius);
+    g.addColorStop(0, `rgba(150,220,255,${0.6 * intensity})`);
+    g.addColorStop(1, "rgba(80,160,255,0)");
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(sp.x, sp.y, ship.radius, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // Collapse "pop": a shockwave ring that bursts off the hull the instant
+  // the shield shatters and expands as the break timer runs down. Kept
+  // from the old bubble so a break still snaps outward, even though the
+  // steady shield is now painted on the hull rather than floating around it.
+  if (ship.shieldBreakFlash > 0) {
+    const k = ship.shieldBreakFlash / 0.5;             // 1 -> 0
+    const rr = ship.radius * SHIELD_RADIUS_MULT * (1 + (1 - k) * 1.1);
+    ctx.save();
+    ctx.globalCompositeOperation = "lighter";
+    ctx.strokeStyle = `rgba(150,220,255,${0.85 * k})`;
+    ctx.lineWidth = 3.5 * k + 0.6;
+    ctx.beginPath();
+    ctx.arc(sp.x, sp.y, rr, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
+  }
+}
+
+// Per-interception flares: an expanding ripple arc hugging the bubble at
+// the contact point, plus a bright core flash that fades over the hit's
+// short lifetime. Drawn additively so multiple intercepts stack into a
+// brighter sheen on the shield.
+function drawShieldImpacts() {
+  if (shieldImpacts.length === 0) return;
+  ctx.save();
+  ctx.globalCompositeOperation = "lighter";
+  for (const s of shieldImpacts) {
+    const k = Math.max(0, s.life / s.maxLife); // 1 -> 0
+    const sp = worldToScreen(s.x, s.y);
+    const ang = Math.atan2(s.ny, s.nx);
+
+    // Ripple arc — expands and fades outward from the impact.
+    const rr = 12 + (1 - k) * 30;
+    ctx.strokeStyle = `rgba(180,230,255,${0.9 * k})`;
+    ctx.lineWidth = 2.5 * k + 0.4;
+    ctx.beginPath();
+    ctx.arc(sp.x, sp.y, rr, ang - 1.0, ang + 1.0);
+    ctx.stroke();
+
+    // Hot core flash at the point of contact.
+    const cr = 4 + 14 * k;
+    const g = ctx.createRadialGradient(sp.x, sp.y, 0, sp.x, sp.y, cr);
+    g.addColorStop(0, `rgba(230,248,255,${0.95 * k})`);
+    g.addColorStop(1, "rgba(120,200,255,0)");
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(sp.x, sp.y, cr, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
 function drawShip() {
+  // While destroyed, the hull is gone — just the explosion debris (drawn
+  // as particles) and the respawn countdown remain.
+  if (ship.respawnTimer > 0) return;
+
   const sp = worldToScreen(ship.x, ship.y);
   const boosting = keys["ShiftLeft"] || keys["ShiftRight"];
+
+  // Blink during post-respawn i-frames so the player reads as protected.
+  if (ship.invuln > 0 && Math.floor(ship.invuln * 10) % 2 === 0) return;
 
   // ---- Hull. Use the prerendered sprite if loaded; otherwise fall back
   // to a vector arrowhead so the ship stays visible while the image
@@ -1210,13 +3107,140 @@ function drawVelocityVector() {
 const hudSpeed = document.getElementById("hud-speed");
 const hudHeading = document.getElementById("hud-heading");
 const hudPos = document.getElementById("hud-pos");
+const hudHealth = document.getElementById("hud-health");
+const hudHealthFill = document.getElementById("hud-healthbar-fill");
+const hudShield = document.getElementById("hud-shield");
+const hudShieldFill = document.getElementById("hud-shieldbar-fill");
+const mCruisers = document.getElementById("m-cruisers");
+const mFighters = document.getElementById("m-fighters");
+const mReplenish = document.getElementById("m-replenish");
+const mTime = document.getElementById("m-time");
+
+// Format seconds as M:SS.s for the mission timer / end screen.
+function formatTime(sec) {
+  const m = Math.floor(sec / 60);
+  const s = sec - m * 60;
+  return m + ":" + (s < 10 ? "0" : "") + s.toFixed(1);
+}
+
+function updateMissionPanel() {
+  const left = MISSION.totalCruisers - mission.cruisersDestroyed;
+  mCruisers.textContent = mission.cruisersDestroyed + " / " + MISSION.totalCruisers;
+  mCruisers.classList.toggle("done", left <= 0);
+  mFighters.textContent = mission.fightersDestroyed;
+  // Once the cruisers are gone there are no more waves.
+  mReplenish.textContent = left > 0
+    ? Math.max(0, mission.replenishTimer).toFixed(1) + "s"
+    : "—";
+  mTime.textContent = formatTime(mission.elapsed);
+}
 
 function updateHud() {
+  updateMissionPanel();
+  const hp = Math.max(0, ship.health);
+  const frac = Math.max(0, Math.min(1, hp / ship.maxHealth));
+  hudHealth.textContent = Math.ceil(hp);
+  hudHealthFill.style.width = (frac * 100) + "%";
+  // Green when healthy, shifting to red as the hull fails.
+  const hue = Math.round(frac * 140); // 0 = red, 140 = green
+  hudHealthFill.style.background =
+    `linear-gradient(90deg, hsl(${hue},80%,45%), hsl(${hue},90%,60%))`;
+
+  // Shield bar. Dims while still on the out-of-combat cooldown so you can
+  // read at a glance whether it's actively regenerating.
+  const sh = Math.max(0, ship.shield);
+  const sfrac = Math.max(0, Math.min(1, sh / ship.maxShield));
+  hudShield.textContent = Math.ceil(sh);
+  hudShieldFill.style.width = (sfrac * 100) + "%";
+  const regenerating = ship.outOfCombat >= ship.shieldRegenDelay;
+  hudShieldFill.style.opacity = (regenerating || sh >= ship.maxShield) ? "1" : "0.55";
+
   const speed = Math.hypot(ship.vx, ship.vy);
   hudSpeed.textContent = speed.toFixed(1);
   const hDeg = ((ship.heading * 180 / Math.PI) % 360 + 360) % 360;
   hudHeading.textContent = hDeg.toFixed(0) + "°";
   hudPos.textContent = ship.x.toFixed(0) + ", " + ship.y.toFixed(0);
+}
+
+// Full-screen victory card shown when the mission is won. Frozen scene
+// behind it; prompts the player to restart.
+function drawMissionComplete() {
+  if (mission.state !== "won") return;
+  ctx.save();
+  ctx.fillStyle = "rgba(3,6,14,0.62)";
+  ctx.fillRect(0, 0, viewW, viewH);
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  const cx = viewW / 2, cy = viewH / 2;
+
+  ctx.fillStyle = "rgba(130,255,190,0.96)";
+  ctx.shadowColor = "rgba(60,255,160,0.7)";
+  ctx.shadowBlur = 18;
+  ctx.font = "600 48px ui-monospace, Consolas, monospace";
+  ctx.fillText("MISSION COMPLETE", cx, cy - 62);
+
+  ctx.shadowBlur = 6;
+  ctx.fillStyle = "rgba(200,230,255,0.9)";
+  ctx.font = "18px ui-monospace, Consolas, monospace";
+  ctx.fillText("All heavy cruisers destroyed", cx, cy - 20);
+
+  ctx.shadowBlur = 8;
+  ctx.fillStyle = "rgba(255,255,255,0.96)";
+  ctx.font = "600 30px ui-monospace, Consolas, monospace";
+  ctx.fillText("TIME  " + formatTime(mission.elapsed), cx, cy + 22);
+
+  ctx.shadowBlur = 4;
+  ctx.fillStyle = "rgba(150,200,230,0.85)";
+  ctx.font = "15px ui-monospace, Consolas, monospace";
+  ctx.fillText("Fighters destroyed: " + mission.fightersDestroyed, cx, cy + 56);
+
+  ctx.shadowBlur = 10;
+  ctx.fillStyle = "rgba(180,255,210,0.92)";
+  ctx.font = "16px ui-monospace, Consolas, monospace";
+  ctx.fillText("Press  R  or click to fly again", cx, cy + 98);
+  ctx.restore();
+}
+
+// Reset everything to a fresh mission start.
+function restartGame() {
+  ship.x = 0; ship.y = 0; ship.vx = 0; ship.vy = 0;
+  ship.heading = -Math.PI / 2; ship.headingAccum = 0;
+  ship.health = ship.maxHealth; ship.shield = ship.maxShield;
+  ship.outOfCombat = ship.shieldRegenDelay;
+  ship.invuln = 0; ship.hitFlash = 0;
+  ship.shieldHitFlash = 0; ship.shieldBreakFlash = 0;
+  ship.respawnTimer = 0; ship.currentCap = ship.maxSpeed;
+
+  enemies.length = 0;
+  projectiles.length = 0;
+  enemyProjectiles.length = 0;
+  enemyTorpedoes.length = 0;
+  bombs.length = 0;
+  torpedoes.length = 0;
+  missiles.length = 0;
+  particles.length = 0;
+  damageNumbers.length = 0;
+  shieldImpacts.length = 0;
+  trail.length = 0;
+
+  for (const w of weapons) {
+    w.ammo = w.maxAmmo;
+    w.reloading = false;
+    w.reloadTimer = 0;
+    w.cooldown = 0;
+    if (w.type === "auto") w.active = false;   // missiles start disabled
+  }
+  activeWeaponIndex = 0;
+  weapon = weapons[0];
+
+  mission.state = "active";
+  mission.elapsed = 0;
+  mission.cruisersDestroyed = 0;
+  mission.fightersDestroyed = 0;
+  mission.replenishTimer = MISSION.replenishInterval;
+
+  camera.x = 0; camera.y = 0;
+  spawnInitialEnemies();
 }
 
 // ---------------------------------------------------------------------------
@@ -1233,14 +3257,26 @@ function frame(now) {
   if (dt > MAX_FRAME_DT) dt = MAX_FRAME_DT;
   accum += dt;
   while (accum >= FIXED_DT) {
-    updateShip(FIXED_DT);
-    updateAsteroids(FIXED_DT);
-    updateEnemies(FIXED_DT);
-    updateWeapons(FIXED_DT);
-    updateProjectiles(FIXED_DT);
-    updateParticles(FIXED_DT);
-    updateTrail(FIXED_DT);
-    updateCamera(FIXED_DT);
+    // Freeze the whole simulation once the mission is won — the world holds
+    // under the end screen until the player restarts.
+    if (mission.state === "active") {
+      mission.elapsed += FIXED_DT;
+      updateShip(FIXED_DT);
+      updateAsteroids(FIXED_DT);
+      updateEnemies(FIXED_DT);
+      updateWeapons(FIXED_DT);
+      updateBombs(FIXED_DT);
+      updateTorpedoes(FIXED_DT);
+      updateMissiles(FIXED_DT);
+      updateProjectiles(FIXED_DT);
+      updateEnemyProjectiles(FIXED_DT);
+      updateEnemyTorpedoes(FIXED_DT);
+      updateShieldImpacts(FIXED_DT);
+      updateDamageNumbers(FIXED_DT);
+      updateParticles(FIXED_DT);
+      updateTrail(FIXED_DT);
+      updateCamera(FIXED_DT);
+    }
     accum -= FIXED_DT;
   }
 
@@ -1254,9 +3290,21 @@ function frame(now) {
   drawTrail();
   drawParticles();
   drawShip();
+  drawShieldOverlay();
+  drawShieldImpacts();
   drawAimCone();
   drawAimReticle();
   drawProjectiles();
+  drawEnemyProjectiles();
+  drawEnemyTorpedoes();
+  drawTorpedoes();
+  drawMissiles();
+  drawBombs();
+  drawDamageNumbers();
+  drawDamageOverlay();
+  drawRespawnNotice();
+  drawHotbar();
+  drawMissionComplete();
 
   updateHud();
   requestAnimationFrame(frame);
